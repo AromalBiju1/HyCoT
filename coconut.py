@@ -38,6 +38,13 @@ class Coconut(nn.Module):
 
     def forward(self, input_ids, attention_mask, labels, position_ids, **kwargs):
 
+        assert input_ids.shape[0] == 1, (
+            "Qwen3.5 patch only supports batch_size=1 -- the original truncation "
+            "logic assumed multi-instance batches with misaligned latent counts; "
+            "at batch_size=1 it was a no-op, so it's removed rather than made "
+            "DeltaNet-compatible. Use gradient_accumulation_steps for throughput."
+        )
+
         logits = []
 
         latent_indices = (
@@ -79,15 +86,11 @@ class Coconut(nn.Module):
                 hidden_states_offset = 0
 
             else:
-                # extract kv cache to reuse
-                past_key_values = [
-                    (
-                        k[:, :, : next_compute_range[0], :],
-                        v[:, :, : next_compute_range[0], :],
-                    )
-                    for k, v in kv_cache
-                ]
-
+                # Qwen3.5 patch: at batch_size=1 this truncation was always a
+                # no-op (next_compute_range[0] == the cache's current length),
+                # so pass kv_cache straight through instead of slicing it.
+                # DeltaNet's conv_states/recurrent_states can't be sliced like
+                # attention KV anyway -- see project notes.
                 outputs = self.base_causallm(
                     inputs_embeds=inputs_embeds[
                         :, next_compute_range[0] : next_compute_range[1], :
@@ -96,7 +99,7 @@ class Coconut(nn.Module):
                     position_ids=position_ids[
                         :, next_compute_range[0] : next_compute_range[1]
                     ],
-                    past_key_values=past_key_values,
+                    past_key_values=kv_cache,
                     output_hidden_states=True,
                 )
 
@@ -164,17 +167,7 @@ class Coconut(nn.Module):
             ],
             attention_mask=attention_mask[:, : next_compute_range[1]],
             position_ids=position_ids[:, next_compute_range[0] : next_compute_range[1]],
-            past_key_values=(
-                [
-                    (
-                        k[:, :, : next_compute_range[0], :],
-                        v[:, :, : next_compute_range[0], :],
-                    )
-                    for k, v in kv_cache
-                ]
-                if kv_cache
-                else None
-            ),
+            past_key_values=kv_cache,  # Qwen3.5 patch: same no-op removal as above
             output_hidden_states=True,
         )
 
