@@ -29,6 +29,34 @@ import torch
 import torch.optim as optim
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+
+def make_optimizer(model, configs):
+    # Vanilla torch.optim.AdamW keeps exp_avg + exp_avg_sq in fp32 -- 8
+    # bytes/param of optimizer state. For a ~4B-param model that's ~32GB,
+    # which does not fit alongside ~8GB bf16 weights + ~8GB bf16 grads in
+    # 2x14.56GiB T4s (OOM'd on the very first optimizer.step()). bitsandbytes'
+    # AdamW8bit quantizes optimizer state to ~1 byte/param (~8GB total here),
+    # bringing the whole training footprint to a fittable ~24GB. This is the
+    # actual long-term fix for this hardware, not a size tweak -- if
+    # bitsandbytes is ever missing, warn loudly rather than silently OOMing
+    # again on the fallback.
+    try:
+        import bitsandbytes as bnb
+        print("Using bitsandbytes AdamW8bit (required to fit optimizer state on 2x T4).")
+        return bnb.optim.AdamW8bit(
+            model.parameters(), lr=configs.lr, weight_decay=configs.weight_decay
+        )
+    except ImportError:
+        print(
+            "WARNING: bitsandbytes not installed -- falling back to vanilla "
+            "torch.optim.AdamW. Its fp32 optimizer state (~8 bytes/param) will "
+            "very likely OOM on 2x T4 for a model this size. Run "
+            "`pip install bitsandbytes` before training, not just for the smoke test."
+        )
+        return optim.AdamW(
+            model.parameters(), lr=configs.lr, weight_decay=configs.weight_decay
+        )
+
 import wandb
 
 from coconut import Coconut
@@ -207,9 +235,7 @@ def main():
     if configs.reset_optimizer:
         optimizer = None
     else:
-        optimizer = optim.AdamW(
-            model.parameters(), lr=configs.lr, weight_decay=configs.weight_decay
-        )
+        optimizer = make_optimizer(model, configs)
 
     best_acc = 0
 
@@ -285,9 +311,7 @@ def main():
 
             if configs.reset_optimizer:
                 del optimizer
-                optimizer = optim.AdamW(
-                    model.parameters(), lr=configs.lr, weight_decay=configs.weight_decay
-                )
+                optimizer = make_optimizer(model, configs)
 
             model.train()
 
