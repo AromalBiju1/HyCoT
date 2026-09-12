@@ -25,6 +25,13 @@
 #     this in DDP/data-parallel for multi-sample throughput without separate
 #     work -- the two don't compose for free.
 
+# Reduce CUDA allocator fragmentation -- MUST be set before torch is imported
+# (before any CUDA context exists). The last OOM traceback showed real memory
+# lost to fragmentation (reserved-but-unallocated > 1GiB), on top of the
+# genuine memory pressure from running a ~4B model on 2x14.56GiB T4s.
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.optim as optim
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -34,16 +41,24 @@ def make_optimizer(model, configs):
     # Vanilla torch.optim.AdamW keeps exp_avg + exp_avg_sq in fp32 -- 8
     # bytes/param of optimizer state. For a ~4B-param model that's ~32GB,
     # which does not fit alongside ~8GB bf16 weights + ~8GB bf16 grads in
-    # 2x14.56GiB T4s (OOM'd on the very first optimizer.step()). bitsandbytes'
-    # AdamW8bit quantizes optimizer state to ~1 byte/param (~8GB total here),
-    # bringing the whole training footprint to a fittable ~24GB. This is the
-    # actual long-term fix for this hardware, not a size tweak -- if
-    # bitsandbytes is ever missing, warn loudly rather than silently OOMing
-    # again on the fallback.
+    # 2x14.56GiB T4s (OOM'd on the very first optimizer.step()).
+    #
+    # bitsandbytes' PagedAdamW8bit (not plain AdamW8bit) is used here
+    # specifically: even with 8-bit-quantized state (~8GB total, vs ~32GB
+    # fp32), steady-state usage (weights+grad+optimizer ~24GB of ~29GB
+    # combined budget) leaves only ~5GB for activations across both GPUs --
+    # razor-thin, so a longer-than-average training example still spikes
+    # past it (observed: OOM inside backward() on later, longer batches even
+    # after gradient checkpointing helped). PagedAdamW8bit uses CUDA unified
+    # memory so those spikes page optimizer state out to host RAM instead of
+    # hard-crashing, at a speed cost only during the actual spike -- this is
+    # the correct lever for "occasional long example causes a memory spike",
+    # as opposed to truncating sequences (a data hack) or shrinking batch
+    # size further (already at the floor of 1).
     try:
         import bitsandbytes as bnb
-        print("Using bitsandbytes AdamW8bit (required to fit optimizer state on 2x T4).")
-        return bnb.optim.AdamW8bit(
+        print("Using bitsandbytes PagedAdamW8bit (quantized + CPU-paged optimizer state).")
+        return bnb.optim.PagedAdamW8bit(
             model.parameters(), lr=configs.lr, weight_decay=configs.weight_decay
         )
     except ImportError:
