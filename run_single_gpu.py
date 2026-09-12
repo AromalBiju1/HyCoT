@@ -9,6 +9,21 @@
 # NOTE: batch_size_training in your config MUST be 1 (Coconut.forward asserts
 # this for the Qwen3.5 patch). Use gradient_accumulation_steps for effective
 # batch size instead.
+#
+# DUAL-T4 SHARDING: model is loaded with device_map="auto" (accelerate shards
+# layers across both visible GPUs), same as smoke_test_coconut.py, because the
+# model + autograd graph OOM'd on a single T4 (14.53/14.56 GiB during
+# backward). This means model.parameters() live on more than one device, so:
+#   - we never call model.to(device) or model.to(bfloat16) after load (that
+#     would collapse the sharding back onto one device) -- dtype is set via
+#     torch_dtype at from_pretrained time instead.
+#   - every batch dict must be moved to wherever the *input* embeddings
+#     landed (input_device below), not a single hardcoded `device`. Accelerate
+#     moves activations between shards internally as they cross layer
+#     boundaries; only the initial input needs to start on the right device.
+#   - IMPORTANT: this is model-parallelism, not data-parallelism. Do not wrap
+#     this in DDP/data-parallel for multi-sample throughput without separate
+#     work -- the two don't compose for free.
 
 import torch
 import torch.optim as optim
@@ -41,6 +56,9 @@ def main():
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # NOTE: `device` above is now only a fallback/reference value (e.g. for
+    # torch.load map_location) -- the model itself is NOT placed on it as a
+    # single device once device_map="auto" is used below. See input_device.
 
     with open(args.config_file) as f:
         config_dict = yaml.safe_load(f)
@@ -81,7 +99,15 @@ def main():
             f"{configs.resume} epochs"
         )
 
-    model = AutoModelForCausalLM.from_pretrained(configs.model_id)
+    model = AutoModelForCausalLM.from_pretrained(
+        configs.model_id,
+        torch_dtype=torch.bfloat16 if configs.bf16 else None,
+        device_map="auto",
+    )
+    # dtype is now set at load time via torch_dtype (bf16 if configured) --
+    # do NOT call model.to(torch.bfloat16) later, since that would require
+    # collapsing the accelerate-sharded model back onto one device first.
+
     tokenizer = AutoTokenizer.from_pretrained(configs.model_id)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_tokens("<|start-latent|>")
@@ -94,7 +120,13 @@ def main():
     loaded = False
 
     if configs.load_model_path != "None":
-        saved_weights = torch.load(configs.load_model_path, map_location=device)
+        # map_location="cpu": with device_map="auto" already sharding the live
+        # model across GPUs, loading the checkpoint straight to a single
+        # `device` here would both fight that placement and temporarily
+        # double GPU memory. load_state_dict copies values into the existing
+        # (already correctly placed) parameters regardless of the state
+        # dict's own device, so cpu is the safe, low-memory choice.
+        saved_weights = torch.load(configs.load_model_path, map_location="cpu")
 
         if configs.coconut and not any(
             k.startswith("base_causallm") for k in saved_weights.keys()
@@ -136,12 +168,13 @@ def main():
     if configs.load_model_path != "None" and not loaded:
         print(model.load_state_dict(saved_weights, strict=False))
 
-    print(f"Running single-GPU on {device}")
-    model = model.to(device)
-
-    if configs.bf16:
-        model.to(torch.bfloat16)
-
+    # input_device: wherever accelerate actually put the input embeddings.
+    # device_map="auto" decides real per-layer placement, not necessarily
+    # GPU 0 -- every batch sent into the model must start here, same as
+    # smoke_test_coconut.py. We deliberately do NOT call model.to(device)
+    # or model.to(bfloat16) -- both would undo the multi-GPU sharding.
+    input_device = next(model.get_input_embeddings().parameters()).device
+    print(f"Sharded model loaded via device_map='auto'; input_device={input_device}")
     print(model)
 
     question_val = [d["question"] for d in json.load(open(configs.val_path))]
@@ -286,7 +319,11 @@ def main():
                     wandb_run.log({"data_table": copy(text_table)})
 
                 total_train_steps += 1
-                batch = {key: batch[key].to(device) for key in batch.keys() if key != "idx"}
+                batch = {
+                    key: batch[key].to(input_device)
+                    for key in batch.keys()
+                    if key != "idx"
+                }
 
                 outputs = model(**batch)
 
@@ -329,7 +366,9 @@ def main():
                 model.eval()
                 for step, batch in enumerate(valid_loss_dataloader):
                     batch = {
-                        key: batch[key].to(device) for key in batch.keys() if key != "idx"
+                        key: batch[key].to(input_device)
+                        for key in batch.keys()
+                        if key != "idx"
                     }
                     outputs = model(**batch)
                     loss = outputs.loss
@@ -353,7 +392,7 @@ def main():
                 test_idx = batch["idx"][0]
 
                 batch = {
-                    k: v.to(device)
+                    k: v.to(input_device)
                     for k, v in batch.items()
                     if v is not None and k not in ["idx", "position_ids"]
                 }
