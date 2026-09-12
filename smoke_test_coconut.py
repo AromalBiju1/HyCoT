@@ -58,8 +58,17 @@ def main():
         from collections import Counter
         counts = Counter(layer_types)
         print(f"num layers: {len(layers)}")
-        print(f"layer type counts: {dict(counts)}")
-        linear_attn = sum(v for k, v in counts.items() if "Linear" in k or "DeltaNet" in k or "Gated" in k)
+        print(f"layer type counts (outer class, all identical by design): {dict(counts)}")
+        # The linear-attn/full-attn split does NOT show up in the outer class
+        # name (every layer reports as Qwen3_5DecoderLayer) -- it lives in
+        # whether each layer actually has a populated linear_attn submodule.
+        # String-matching the outer class name against
+        # "Linear"/"DeltaNet"/"Gated" always reports 0 linear-attn layers;
+        # this per-layer submodule check is the correct one.
+        linear_attn = sum(
+            1 for l in layers
+            if getattr(l, "linear_attn", None) is not None
+        )
         full_attn = len(layers) - linear_attn
         print(f"linear-attn layers: {linear_attn}, full-attn layers: {full_attn} "
               f"(expected ~3:1 ratio if architecture matches base Qwen3.5)")
