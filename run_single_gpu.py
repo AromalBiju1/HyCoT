@@ -204,6 +204,20 @@ def main():
     # input_device was captured earlier (right after the raw AutoModelForCausalLM
     # load, before Coconut wrapping) since Coconut doesn't proxy get_input_embeddings().
     print(f"Sharded model loaded via device_map='auto'; input_device={input_device}")
+
+    # Gradient checkpointing: without flash-linear-attention (removed earlier --
+    # its fused_recurrent kernel has no backward), both DeltaNet paths run on
+    # plain PyTorch reference kernels, which materialize far more intermediate
+    # activation tensors during backward than fla's chunked/fused kernels would.
+    # This showed up as a real OOM inside loss.backward() (not optimizer.step(),
+    # already fixed via bitsandbytes) on a longer-than-average GSM8K example a
+    # few steps into training. Checkpointing recomputes activations during
+    # backward instead of storing them all -- the standard fix for this failure
+    # mode, as opposed to shrinking batch size further (already at the floor:
+    # batch_size_training=1) or truncating sequences (a data hack, not a fix).
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
+    print("Gradient checkpointing enabled (trades compute for activation memory).")
     print(model)
 
     question_val = [d["question"] for d in json.load(open(configs.val_path))]
@@ -313,6 +327,10 @@ def main():
                 del optimizer
                 optimizer = make_optimizer(model, configs)
 
+            # Restore use_cache=False for training + gradient checkpointing --
+            # the previous epoch's generation loop (if any) turned it back on.
+            getattr(model, "base_causallm", model).config.use_cache = False
+
             model.train()
 
             total_length = len(train_dataloader) // configs.gradient_accumulation_steps
@@ -411,6 +429,15 @@ def main():
         )
         cor, cor_cot, total = 0, 0, 0
 
+        # use_cache was disabled for training (required alongside gradient
+        # checkpointing) but generation is much faster with KV caching and
+        # doesn't need the checkpointing memory tradeoff -- re-enable it just
+        # for this generate() loop. model may be wrapped in Coconut (real
+        # config lives at model.base_causallm.config), or be the plain
+        # AutoModelForCausalLM if configs.coconut is False.
+        gen_config = getattr(model, "base_causallm", model).config
+        gen_config.use_cache = True
+
         with torch.no_grad():
             model.eval()
             for idx, batch in enumerate(valid_gen_dataloader):
@@ -433,6 +460,7 @@ def main():
                 outputs = model.generate(
                     **batch, max_new_tokens=max_new_tokens, synced_gpus=False
                 )
+
 
                 text_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
                 answer_output = text_output.split("#")[-1].replace(",", "").strip()
