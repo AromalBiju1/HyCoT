@@ -21,7 +21,6 @@ MODEL_ID = "huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated"
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    torch.autograd.set_detect_anomaly(True)
 
     print("Loading tokenizer/model...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -34,8 +33,14 @@ def main():
     end_id = tokenizer.convert_tokens_to_ids("<|end-latent|>")
 
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16
+        MODEL_ID, torch_dtype=torch.bfloat16, device_map="auto"
     )
+    # device_map="auto" shards layers across both visible GPUs (Kaggle T4 x2)
+    # via accelerate, since the model + autograd graph didn't fit on one T4
+    # (OOM'd at 14.53/14.56 GiB on a single device during backward). Do NOT
+    # also wrap this in DDP/data-parallel later -- model parallelism here and
+    # data parallelism don't compose without extra work; that's a separate
+    # decision for run_single_gpu.py if dual-T4 throughput is wanted too.
 
     # --- Architecture/tokenizer sanity check ---------------------------------
     # Earlier validation (cache-class structure, DeltaNet layer ratio, the
@@ -78,7 +83,9 @@ def main():
         model.lm_head.weight.data[token_id] = model.lm_head.weight.data[target_id]
 
     coconut_model = Coconut(model, latent_id, start_id, end_id, tokenizer.eos_token_id)
-    coconut_model = coconut_model.to(device)
+    # NOTE: no .to(device) here -- model is already sharded across GPUs by
+    # device_map="auto" above; forcing it onto a single device would undo
+    # that and bring back the single-GPU OOM.
     coconut_model.train()
 
     # Hand-built example: a short question, 2 latent tokens standing in for
@@ -95,7 +102,13 @@ def main():
 
     input_ids = torch.cat(
         [q_ids, torch.tensor(latent_span, dtype=q_ids.dtype), answer_ids]
-    ).unsqueeze(0).to(device)
+    ).unsqueeze(0)
+    # Place on whatever device the input embedding layer actually landed on
+    # (device_map="auto" decides this, not necessarily GPU 0). Accelerate's
+    # hooks move activations between GPUs internally as they cross shards;
+    # only the initial input needs to start on the right device.
+    input_device = next(model.get_input_embeddings().parameters()).device
+    input_ids = input_ids.to(input_device)
 
     attention_mask = torch.ones_like(input_ids)
 
@@ -104,7 +117,7 @@ def main():
     mask_len = q_ids.shape[0] + len(latent_span)
     labels[0, :mask_len] = -100
 
-    position_ids = torch.arange(0, input_ids.shape[1], device=device).unsqueeze(0)
+    position_ids = torch.arange(0, input_ids.shape[1], device=input_device).unsqueeze(0)
 
     print(f"input_ids shape: {input_ids.shape}, n_latent_tokens: {n_latent}")
     print("Running forward pass...")
