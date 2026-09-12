@@ -11,6 +11,96 @@ Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 8
 
 
+def _patch_linear_attention_cache_for_training():
+    """
+    Monkey-patch transformers' LinearAttentionLayer.update_recurrent_state /
+    update_conv_state to reassign the state tensor out-of-place instead of
+    mutating it in place with .copy_().
+
+    Root cause (confirmed against the installed transformers source,
+    cache_utils.py): both methods intentionally use `.copy_()` into a
+    persistent buffer so the tensor's memory address stays stable across
+    calls -- this is a CUDA-graph capture/replay optimization for inference.
+    But it means: within a single forward call, the layer reads the buffer
+    as `initial_state`, fla's ChunkGatedDeltaRuleFunction.forward saves that
+    exact tensor object for its own backward (see fla/ops/gated_delta_rule/
+    chunk.py, ctx.save_for_backward(..., initial_state, ...)), and then
+    update_recurrent_state's .copy_() overwrites that same buffer's contents
+    in place -- before the forward call even returns. Autograd then fails at
+    .backward() with "modified by an inplace operation", because the tensor
+    it needs to read no longer holds the value it had when it was saved.
+
+    This is not specific to Coconut's multi-pass reuse -- it would break
+    ANY use of use_cache=True combined with .backward() on this hybrid
+    architecture, since the static-address optimization was written for
+    inference and is fundamentally incompatible with training through the
+    cache.
+
+    Fix: reassign the list entry to a new tensor instead of copying into
+    the old one. This costs one extra small tensor allocation per layer per
+    step (state shape is tiny -- e.g. [1, num_heads, head_dim, head_dim])
+    and gives up CUDA-graph static addressing, which Coconut's training loop
+    doesn't use anyway. Call this once, before training starts.
+    """
+    from transformers import cache_utils
+
+    if not hasattr(cache_utils, "LinearAttentionLayer"):
+        raise AttributeError(
+            "transformers.cache_utils.LinearAttentionLayer not found -- this patch "
+            "was written against transformers==5.17.0's cache_utils.py. Your installed "
+            "version may have renamed/restructured this class. Run "
+            "`print([n for n in dir(cache_utils) if 'Linear' in n or 'Layer' in n])` "
+            "to find the current name and update this patch accordingly -- do not "
+            "silently skip this, since without it training will hit the in-place "
+            "gradient error again."
+        )
+
+    def _patched_update_recurrent_state(self, recurrent_states, state_idx=0, **kwargs):
+        if not self.is_recurrent_states_initialized[state_idx]:
+            self.lazy_initialization(recurrent_states=recurrent_states, state_idx=state_idx)
+        # Out-of-place: preserves autograd's saved-for-backward reference to
+        # this buffer's prior contents instead of overwriting them in place.
+        self.recurrent_states[state_idx] = recurrent_states
+        return self.recurrent_states[state_idx]
+
+    def _patched_update_conv_state(
+        self, conv_states, state_idx=0, conv_kernel_size=None, **kwargs
+    ):
+        if not self.is_conv_states_initialized[state_idx]:
+            self.lazy_initialization(
+                conv_states=conv_states, state_idx=state_idx, conv_kernel_size=conv_kernel_size
+            )
+
+        if not self.has_previous_state[state_idx]:
+            full_conv_states = conv_states
+            self.has_previous_state[state_idx] = True
+            if (
+                not self.record_past
+                and full_conv_states.shape[-1] < self.conv_kernel_size[state_idx]
+            ):
+                padding_length = self.conv_kernel_size[state_idx] - full_conv_states.shape[-1]
+                full_conv_states = torch.nn.functional.pad(
+                    full_conv_states, (padding_length, 0), value=0
+                )
+        else:
+            full_conv_states = torch.cat([self.conv_states[state_idx], conv_states], dim=-1)
+
+        if not self.record_past:
+            # Out-of-place (was: self.conv_states[state_idx].copy_(...))
+            self.conv_states[state_idx] = full_conv_states[..., -self.conv_kernel_size[state_idx] :]
+        else:
+            self.conv_states[state_idx] = full_conv_states
+
+        return full_conv_states
+
+    cache_utils.LinearAttentionLayer.update_recurrent_state = _patched_update_recurrent_state
+    cache_utils.LinearAttentionLayer.update_conv_state = _patched_update_conv_state
+
+
+# Applied at import time so `import coconut` is enough -- no separate call needed.
+_patch_linear_attention_cache_for_training()
+
+
 def _clone_cache_states(kv_cache):
     """
     Clone the mutable recurrent/conv state tensors inside a hybrid
