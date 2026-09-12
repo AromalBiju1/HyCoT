@@ -11,6 +11,63 @@ Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 8
 
 
+def _clone_cache_states(kv_cache):
+    """
+    Clone the mutable recurrent/conv state tensors inside a hybrid
+    DeltaNet+attention cache (e.g. Qwen3.5's DynamicCache of per-layer
+    LinearAttentionLayer / attention-layer objects) before handing the cache
+    to the next forward pass.
+
+    Why this exists: HF's reference `torch_chunk_gated_delta_rule` kernel
+    updates `recurrent_states` (and `causal_conv1d`-path updates
+    `conv_states`) IN PLACE during each forward call. Coconut re-enters the
+    model multiple times, passing the same cache object forward each time
+    (`past_key_values=kv_cache`). Without cloning, pass N+1 mutates the exact
+    tensor pass N's backward graph still references, so autograd raises
+    "variable needed for gradient computation has been modified by an
+    inplace operation" on `.backward()`.
+
+    Cloning (never detaching) breaks the aliasing while keeping the state
+    fully differentiable -- gradients still flow back through the cloned
+    tensor to whatever produced it, which is required for continuous-thought
+    training to actually train anything upstream of the state update.
+
+    This function is defensive about cache internals: it walks whatever
+    layer/attribute structure is present and clones any tensor it finds
+    under attribute names containing "state" (conv_states, recurrent_states,
+    or any future-renamed equivalent), and dict-wrapped tensors within them.
+    Attention-only layers (standard KV cache) are left untouched -- ordinary
+    KV tensors aren't mutated in place by attention and don't need this.
+    """
+    if kv_cache is None:
+        return kv_cache
+
+    # Try the common "cache has a list of per-layer objects" shape first
+    # (DynamicCache-style). Fall back to introspecting the cache object
+    # itself if that attribute doesn't exist.
+    layers = getattr(kv_cache, "layers", None)
+    if layers is None:
+        # Older/alternate cache shapes sometimes store layers elsewhere.
+        layers = getattr(kv_cache, "key_cache", None) or []
+
+    for layer in layers:
+        for attr_name in list(vars(layer).keys()) if hasattr(layer, "__dict__") else []:
+            if "state" not in attr_name:
+                continue
+            value = getattr(layer, attr_name)
+            if torch.is_tensor(value):
+                setattr(layer, attr_name, value.clone())
+            elif isinstance(value, dict):
+                cloned = {
+                    k: (v.clone() if torch.is_tensor(v) else v)
+                    for k, v in value.items()
+                }
+                setattr(layer, attr_name, cloned)
+            # else: leave non-tensor, non-dict attributes untouched
+
+    return kv_cache
+
+
 class Coconut(nn.Module):
 
     def __init__(
@@ -122,7 +179,14 @@ class Coconut(nn.Module):
             hidden_states = outputs.hidden_states[
                 -1
             ]  # Get the last layer hidden states
-            kv_cache = outputs.past_key_values
+
+            # Clone DeltaNet recurrent/conv states before this cache gets fed
+            # into the next pass -- see _clone_cache_states docstring. This is
+            # the fix for the "modified by an inplace operation" backward
+            # error: each pass now gets its own tensor version, so autograd's
+            # saved-for-backward references from pass_idx stay valid even
+            # after pass_idx+1 runs.
+            kv_cache = _clone_cache_states(outputs.past_key_values)
 
             # feedback the continuous thoughts to the input_embeds
 
@@ -167,7 +231,7 @@ class Coconut(nn.Module):
             ],
             attention_mask=attention_mask[:, : next_compute_range[1]],
             position_ids=position_ids[:, next_compute_range[0] : next_compute_range[1]],
-            past_key_values=kv_cache,  # Qwen3.5 patch: same no-op removal as above
+            past_key_values=kv_cache,  # Qwen3.5 patch: same no-op removal as above, now cloned per pass
             output_hidden_states=True,
         )
 
