@@ -108,6 +108,11 @@ def main():
     # do NOT call model.to(torch.bfloat16) later, since that would require
     # collapsing the accelerate-sharded model back onto one device first.
 
+    # Capture input_device HERE, on the raw AutoModelForCausalLM, before any
+    # Coconut wrapping below -- Coconut doesn't proxy get_input_embeddings(),
+    # so calling this after `model = Coconut(model, ...)` raises AttributeError.
+    input_device = next(model.get_input_embeddings().parameters()).device
+
     tokenizer = AutoTokenizer.from_pretrained(configs.model_id)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_tokens("<|start-latent|>")
@@ -168,12 +173,8 @@ def main():
     if configs.load_model_path != "None" and not loaded:
         print(model.load_state_dict(saved_weights, strict=False))
 
-    # input_device: wherever accelerate actually put the input embeddings.
-    # device_map="auto" decides real per-layer placement, not necessarily
-    # GPU 0 -- every batch sent into the model must start here, same as
-    # smoke_test_coconut.py. We deliberately do NOT call model.to(device)
-    # or model.to(bfloat16) -- both would undo the multi-GPU sharding.
-    input_device = next(model.get_input_embeddings().parameters()).device
+    # input_device was captured earlier (right after the raw AutoModelForCausalLM
+    # load, before Coconut wrapping) since Coconut doesn't proxy get_input_embeddings().
     print(f"Sharded model loaded via device_map='auto'; input_device={input_device}")
     print(model)
 
