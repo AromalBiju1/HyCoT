@@ -1,0 +1,26 @@
+# debug_run.yaml — small first-run config
+seed: 0
+model_id: "huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated"
+save_path: "/kaggle/working/checkpoints"
+name: "coconut_debug"
+debug: true              # caps dataset to 32 val / 5000 train examples
+only_eval: false
+coconut: true
+cot: false
+no_cot: false
+no_thoughts: false
+resume: 0
+load_model_path: "None"
+train_path: "/kaggle/working/data/gsm_train.json"   # you need real GSM8K json here
+val_path: "/kaggle/working/data/gsm_valid.json"
+num_epochs: 1
+epochs_per_stage: 1
+batch_size_training: 1   # MUST be 1, Coconut asserts it
+gradient_accumulation_steps: 4
+lr: 1.0e-5
+weight_decay: 0.01
+bf16: true
+reset_optimizer: false
+save_only_improve: false
+c_thought: 2              # latent tokens per reasoning step, if used elsewhere
+project: "coconut-qwen3.5"
