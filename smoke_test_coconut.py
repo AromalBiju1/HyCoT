@@ -21,6 +21,7 @@ MODEL_ID = "huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated"
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    torch.autograd.set_detect_anomaly(True)
 
     print("Loading tokenizer/model...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
