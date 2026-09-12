@@ -141,6 +141,23 @@ def main():
     # so calling this after `model = Coconut(model, ...)` raises AttributeError.
     input_device = next(model.get_input_embeddings().parameters()).device
 
+    # Gradient checkpointing: without flash-linear-attention (removed earlier --
+    # its fused_recurrent kernel has no backward), both DeltaNet paths run on
+    # plain PyTorch reference kernels, which materialize far more intermediate
+    # activation tensors during backward than fla's chunked/fused kernels would.
+    # This showed up as a real OOM inside loss.backward() (not optimizer.step(),
+    # already fixed via bitsandbytes) on a longer-than-average GSM8K example a
+    # few steps into training. Checkpointing recomputes activations during
+    # backward instead of storing them all -- the standard fix for this failure
+    # mode, as opposed to shrinking batch size further (already at the floor:
+    # batch_size_training=1) or truncating sequences (a data hack, not a fix).
+    # MUST happen here, on the raw AutoModelForCausalLM, before Coconut wraps it
+    # below -- same ordering trap as input_device: Coconut doesn't proxy
+    # gradient_checkpointing_enable() either.
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
+    print("Gradient checkpointing enabled (trades compute for activation memory).")
+
     tokenizer = AutoTokenizer.from_pretrained(configs.model_id)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_tokens("<|start-latent|>")
@@ -201,23 +218,11 @@ def main():
     if configs.load_model_path != "None" and not loaded:
         print(model.load_state_dict(saved_weights, strict=False))
 
-    # input_device was captured earlier (right after the raw AutoModelForCausalLM
-    # load, before Coconut wrapping) since Coconut doesn't proxy get_input_embeddings().
+    # input_device and gradient checkpointing were both set up earlier, right
+    # after the raw AutoModelForCausalLM load, before Coconut wrapping -- see
+    # comments above (Coconut proxies neither get_input_embeddings() nor
+    # gradient_checkpointing_enable()).
     print(f"Sharded model loaded via device_map='auto'; input_device={input_device}")
-
-    # Gradient checkpointing: without flash-linear-attention (removed earlier --
-    # its fused_recurrent kernel has no backward), both DeltaNet paths run on
-    # plain PyTorch reference kernels, which materialize far more intermediate
-    # activation tensors during backward than fla's chunked/fused kernels would.
-    # This showed up as a real OOM inside loss.backward() (not optimizer.step(),
-    # already fixed via bitsandbytes) on a longer-than-average GSM8K example a
-    # few steps into training. Checkpointing recomputes activations during
-    # backward instead of storing them all -- the standard fix for this failure
-    # mode, as opposed to shrinking batch size further (already at the floor:
-    # batch_size_training=1) or truncating sequences (a data hack, not a fix).
-    model.gradient_checkpointing_enable()
-    model.config.use_cache = False
-    print("Gradient checkpointing enabled (trades compute for activation memory).")
     print(model)
 
     question_val = [d["question"] for d in json.load(open(configs.val_path))]
