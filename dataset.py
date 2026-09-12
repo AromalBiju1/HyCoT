@@ -43,7 +43,15 @@ def get_dataset(path, tokenizer, max_size=1000000000):
     keys = data[0].keys()
     dataset = Dataset.from_dict({k: [d[k] for d in data] for k in keys})
 
-    if torch.cuda.device_count() > 1:
+    # NOTE: device_count() > 1 alone is NOT sufficient to assume a
+    # torch.distributed process group exists -- on a single-process,
+    # multi-GPU run (e.g. device_map="auto" model-parallel sharding, as used
+    # in run_single_gpu.py for dual-T4 Kaggle), device_count() is 2 but no
+    # process group was ever initialized, so dist.get_rank() below would
+    # raise. Only take the distributed path if a process group is actually
+    # up; otherwise fall through to the plain single-process .map() below,
+    # same as the original single-GPU case.
+    if torch.cuda.device_count() > 1 and dist.is_initialized():
         if dist.get_rank() == 0:
             processed_dataset = [
                 dataset.map(
@@ -301,7 +309,10 @@ def get_cot_latent_dataset(
             "position_ids": list(range(len(tokens))),
         }
 
-    if torch.cuda.device_count() > 1:
+    # See NOTE in get_dataset() above -- same fix: device_count() > 1 does not
+    # imply a torch.distributed process group is initialized (true for
+    # single-process device_map="auto" model-parallel runs).
+    if torch.cuda.device_count() > 1 and dist.is_initialized():
         if dist.get_rank() == 0:
             processed_dataset = base_dataset.map(
                 process_dataset, remove_columns=list(base_dataset.features), num_proc=32
