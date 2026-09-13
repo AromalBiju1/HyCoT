@@ -3,6 +3,7 @@
 # Why a shared module: both scripts need the same target-module detection,
 # LoRA-wrap logic, and trainable-only state-dict save. Duplicating this in
 # both files would drift the moment one gets edited and not the other.
+
 import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model, TaskType
@@ -185,13 +186,19 @@ class SparseTrainableEmbeddingPatch(nn.Module):
 
     def forward(self, input_ids):
         out = self.base_embedding(input_ids)
-        # Clone before the masked overwrite below: out's underlying storage
-        # comes from a frozen nn.Embedding lookup (no grad needed into it),
-        # but writing into it in place without cloning first risks
-        # colliding with anything else that may be reading that same
-        # storage (e.g. autograd's view-tracking). Cloning makes this a
-        # fresh, independently-writable tensor -- cheap, since embedding
-        # outputs are small relative to the model.
+        # Self-heal device placement here rather than trusting the device
+        # captured at __init__ time. With device_map="auto", accelerate's
+        # dispatch hooks can finalize where a shard's weights actually live
+        # AFTER this module was constructed (observed in practice: the
+        # __init__-time snapshot of base_embedding.weight.device ended up
+        # stale, special_embedding stayed on the device recorded at patch
+        # time while base_embedding got moved to a different GPU by the
+        # time forward actually ran). `out` here is guaranteed correct --
+        # it's literally the tensor produced by the call that just
+        # succeeded above -- so use its device as ground truth instead of
+        # any earlier assumption.
+        if self.special_embedding.weight.device != out.device or self.special_embedding.weight.dtype != out.dtype:
+            self.special_embedding = self.special_embedding.to(device=out.device, dtype=out.dtype)
         out = out.clone()
         for tok_id in self.special_token_ids:
             mask = input_ids == tok_id
@@ -252,6 +259,11 @@ class SparseTrainableLMHeadPatch(nn.Module):
 
     def forward(self, hidden_states):
         out = self.base_lm_head(hidden_states)
+        # Same self-heal as SparseTrainableEmbeddingPatch.forward above --
+        # don't trust the device captured at __init__ time, use the device
+        # of the tensor that just successfully passed through base_lm_head.
+        if self.special_lm_head.weight.device != hidden_states.device:
+            self.special_lm_head = self.special_lm_head.to(hidden_states.device)
         out = out.clone()  # see SparseTrainableEmbeddingPatch.forward for why
         extra_logits = self.special_lm_head(hidden_states)
         for i, tok_id in enumerate(self.special_token_ids):
