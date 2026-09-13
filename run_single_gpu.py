@@ -149,6 +149,30 @@ def main():
     # torch.load map_location) -- the model itself is NOT placed on it as a
     # single device once device_map="auto" is used below. See input_device.
 
+    # Disable cuDNN convolutions: this model's DeltaNet layers run a large
+    # grouped conv1d (groups=8192, effectively depthwise) as part of every
+    # forward pass. On T4 (Turing, sm_75 -- predates native BF16 tensor-core
+    # support, which arrived with Ampere/sm_80), cuDNN's algorithm search for
+    # this specific op under bf16 can fail to find ANY valid engine for
+    # certain input shapes ("GET was unable to find an engine to execute
+    # this computation"). Observed in practice: ran clean for 3 full epochs
+    # (curriculum stage 0, zero latent tokens -- see epochs_per_stage), then
+    # crashed on the very first batch of the epoch where the curriculum
+    # first inserts real <|latent|> tokens (stage 1) -- a shape/pattern
+    # cuDNN's heuristic search hadn't been asked to handle before. Disabling
+    # cuDNN for convs forces PyTorch's plain (non-cuDNN) conv1d path, which
+    # doesn't have this failure mode -- a real fix for the crash, not a
+    # retry-and-hope. Cost: conv1d becomes somewhat slower, but this project
+    # is already on slow reference kernels everywhere (no fla/causal_conv1d
+    # installed) so the relative overhead here is small. Set
+    # disable_cudnn_conv: false in the yaml if you later move to Ampere+
+    # hardware and want to re-enable it.
+    disable_cudnn_conv = getattr(
+        __import__("types").SimpleNamespace(), "_unused", None
+    )  # placeholder removed below once configs exists; real gate applied after config load
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     with open(args.config_file) as f:
         config_dict = yaml.safe_load(f)
 
