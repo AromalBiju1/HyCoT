@@ -5,7 +5,17 @@ import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from collections import namedtuple
-from transformers.models.gpt2 import GPT2LMHeadModel
+# NOTE: deliberately NOT importing GPT2LMHeadModel from transformers here.
+# `from transformers.models.gpt2 import GPT2LMHeadModel` pulls in
+# transformers.modeling_layers -> loss_utils -> object-detection loss code
+# -> image_transforms -> torchvision, just to run one isinstance() check
+# below that's never true for Qwen3.5. That chain is fragile (a
+# torch/torchvision version mismatch breaks torchvision::nms registration
+# and takes this entire script down on an import you don't even use) and
+# has nothing to do with Coconut's actual logic. Checking the class name as
+# a string gets the same behavior (GPT2's hidden states live under
+# .transformer, everything else under the model directly) without ever
+# importing GPT2's modeling code or touching torchvision.
 
 Outputs = namedtuple("Outputs", ["loss", "inputs_embeds", "logits"])
 MAX_N_LATENT = 8
@@ -177,8 +187,9 @@ class Coconut(nn.Module):
         self.start_latent_id = start_latent_id
         self.end_latent_id = end_latent_id
 
-        # tested with GPT2 and Llama3
-        if isinstance(self.base_causallm, GPT2LMHeadModel):
+        # tested with GPT2 and Llama3. Duck-typed by class name instead of
+        # isinstance(GPT2LMHeadModel) -- see the import comment above for why.
+        if type(self.base_causallm).__name__ == "GPT2LMHeadModel":
             self.embedding = self.base_causallm.transformer.get_input_embeddings()
         else:
             self.embedding = self.base_causallm.get_input_embeddings()

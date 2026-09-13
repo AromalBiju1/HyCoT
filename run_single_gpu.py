@@ -76,7 +76,7 @@ def make_optimizer(model, configs):
 import wandb
 
 from coconut import Coconut
-from lora_utils import apply_lora, get_trainable_state_dict
+from lora_utils import apply_lora, apply_sparse_new_token_patch, get_trainable_state_dict
 from dataset import (
     get_dataset,
     get_question_latent_dataset,
@@ -224,33 +224,50 @@ def main():
             loaded = True
             print(model.load_state_dict(saved_weights, strict=False))
 
+    special_token_ids = []
+    anchor_id = None
     if not (configs.cot or configs.no_thoughts or configs.no_cot):
         model.resize_token_embeddings(len(tokenizer))
-        embeddings = model.get_input_embeddings()
-        target_id = tokenizer.convert_tokens_to_ids("<<")
-        for token_id in [latent_id, start_id, end_id]:
-            target_embedding = embeddings.weight.data[target_id]
-            embeddings.weight.data[token_id] = target_embedding
-            lm_head = model.lm_head
-            lm_head.weight.data[token_id] = lm_head.weight.data[target_id]
+        anchor_id = tokenizer.convert_tokens_to_ids("<<")
+        special_token_ids = [latent_id, start_id, end_id]
+        # NOTE: no longer manually copying embeddings.weight.data[token_id] /
+        # lm_head.weight.data[token_id] from "<<" here -- that copy is now
+        # done inside apply_sparse_new_token_patch() below (init_from_id),
+        # AFTER LoRA wrapping, as part of setting up the sparse trainable
+        # table for these 3 ids. Doing it here first would just be
+        # overwritten/ignored once the sparse patch takes over forward() for
+        # these ids anyway.
 
     if configs.no_thoughts:
         configs.c_thought = 0
         configs.coconut = False
 
-    # LoRA wrap happens here: after resize_token_embeddings/new-token init
-    # above (so the resized embedding matrix's raw weights get copied in
-    # before anything is frozen), and before Coconut wraps the model (so
-    # Coconut's base_causallm is the PeftModel -- Coconut just proxies
-    # forward()/get_input_embeddings() calls through, doesn't care whether
-    # the object underneath is a raw AutoModelForCausalLM or a PeftModel).
+    # LoRA wrap happens here: after resize_token_embeddings above (so the
+    # resized embedding matrix already has the right vocab size), and
+    # before Coconut wraps the model (so Coconut's base_causallm is the
+    # PeftModel -- Coconut just proxies forward()/get_input_embeddings()
+    # calls through, doesn't care whether the object underneath is a raw
+    # AutoModelForCausalLM or a PeftModel).
     # Default on; set use_lora: false in the yaml config to fall back to the
     # old full-finetune path (e.g. for A/B-testing whether LoRA changes
     # anything besides memory).
-    if getattr(configs, "use_lora", True):
+    use_lora = getattr(configs, "use_lora", True)
+    if use_lora:
         model = apply_lora(model, configs)
     else:
         print("use_lora=false in config -- running full finetune (all params trainable).")
+
+    # Sparse new-token patch: replaces the earlier `lora_modules_to_save:
+    # embed_tokens,lm_head` approach, which unfroze the full ~635M-param
+    # embed_tokens/lm_head matrices just to let 3 rows move -- that's what
+    # OOM'd (~10GB of AdamW state for 1.27B trainable params on a single
+    # T4). This gives only those 3 rows their own small trainable table
+    # (a few thousand params) and leaves the rest of embed_tokens/lm_head
+    # frozen. Only meaningful under LoRA -- if use_lora=false you're doing
+    # a full finetune anyway and embed_tokens/lm_head are already fully
+    # trainable as part of that, so skip this (it would wrongly freeze them).
+    if use_lora and special_token_ids:
+        model = apply_sparse_new_token_patch(model, special_token_ids, anchor_id)
 
     if configs.coconut:
         model = Coconut(model, latent_id, start_id, end_id, tokenizer.eos_token_id)
