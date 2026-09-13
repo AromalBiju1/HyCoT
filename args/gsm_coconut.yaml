@@ -32,4 +32,3 @@ gradient_accumulation_steps: 1
 num_epochs: 25
 lr: !!float "1e-4"
 weight_decay: 0.01
-lora_modules_to_save: "embed_tokens,lm_head"
