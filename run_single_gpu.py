@@ -125,6 +125,16 @@ def main():
             "Warning: found previous run and gonna resume from that. "
             "the inputted `resume` argument is ignored!"
         )
+        # startswith("checkpoint_") intentionally does NOT match this
+        # script's periodic_checkpoint_/nan_checkpoint_/nangrad_checkpoint_
+        # files (mid-epoch saves, see the training loop below) -- those use
+        # different prefixes specifically so they're invisible to this
+        # epoch-based auto-resume, since the sort below assumes every
+        # matched file is "checkpoint_<integer epoch number>" and would
+        # crash on "checkpoint_epoch3_step750" otherwise. A mid-epoch save
+        # is for manually recovering from a killed session (load it by
+        # path, it's just a state dict), not something this loop should
+        # auto-pick-up as "epoch N is done."
         checkpoints = [f for f in cur_ckpts if f.startswith("checkpoint_")]
         checkpoints.sort(key=lambda x: int(x.split("_")[1]))
         latest_checkpoint = checkpoints[-1] if checkpoints else None
@@ -433,14 +443,97 @@ def main():
                 outputs = model(**batch)
 
                 loss = outputs.loss / configs.gradient_accumulation_steps
+
+                # NaN/Inf guard: with a run this long (reference kernels,
+                # no fla/causal_conv1d -- confirmed slow path from the
+                # transformers warnings -- likely multi-day for the full
+                # 25-epoch curriculum), a NaN partway through would
+                # otherwise train silently on garbage for however long is
+                # left, and you'd only discover it at the final accuracy
+                # readout with no way to tell which step it started at or
+                # recover the last good state. Catch it the moment it
+                # appears instead: save what's trained so far under a
+                # clearly-labeled emergency checkpoint and stop cleanly,
+                # rather than continuing to update on Inf/NaN gradients or
+                # (worse) silently saving over a good epoch checkpoint at
+                # the end of this corrupted epoch.
+                if not torch.isfinite(loss):
+                    print(
+                        f"\n!!! NaN/Inf LOSS at epoch {epoch+1}, step {step} "
+                        f"(total_train_steps={total_train_steps}): loss={loss.item()}. "
+                        f"Stopping and saving emergency checkpoint -- see "
+                        f"nan_checkpoint_epoch{epoch+1}_step{total_train_steps} "
+                        f"in {save_dir}."
+                    )
+                    torch.save(
+                        get_trainable_state_dict(model),
+                        os.path.join(
+                            save_dir,
+                            f"nan_checkpoint_epoch{epoch+1}_step{total_train_steps}",
+                        ),
+                    )
+                    raise SystemExit(
+                        1
+                    ) from None  # deliberate hard stop, not a bug to catch upstream
+
                 loss.backward()
 
                 if (step + 1) % configs.gradient_accumulation_steps == 0 or step == len(
                     train_dataloader
                 ) - 1:
+                    # Same reasoning as the loss check above, but for
+                    # gradients specifically: a finite loss can still
+                    # produce an Inf/NaN gradient (e.g. a genuine numerical
+                    # blowup inside backward, distinct from the forward
+                    # pass itself going bad). Checking right before the
+                    # optimizer step -- not every micro-step -- keeps this
+                    # cheap under gradient_accumulation_steps > 1, since
+                    # it's only the moment the update would actually happen.
+                    bad_grad_found = False
+                    for name, param in model.named_parameters():
+                        if param.grad is not None and not torch.isfinite(param.grad).all():
+                            bad_grad_found = True
+                            print(f"NaN/Inf GRADIENT in {name}")
+                    if bad_grad_found:
+                        print(
+                            f"\n!!! NaN/Inf GRADIENT at epoch {epoch+1}, step {step} "
+                            f"(total_train_steps={total_train_steps}). Stopping and "
+                            f"saving emergency checkpoint before optimizer.step() runs "
+                            f"on corrupted gradients."
+                        )
+                        torch.save(
+                            get_trainable_state_dict(model),
+                            os.path.join(
+                                save_dir,
+                                f"nangrad_checkpoint_epoch{epoch+1}_step{total_train_steps}",
+                            ),
+                        )
+                        raise SystemExit(1) from None
+
                     optimizer.step()
                     optimizer.zero_grad()
                     pbar.update(1)
+
+                # Periodic mid-epoch checkpoint: end-of-epoch save alone
+                # means a Kaggle session timeout (~9-12h cap) partway
+                # through a 5000-step epoch loses the entire epoch's
+                # progress. save_every_n_steps defaults to 250 (a save is
+                # just the ~32M trainable params, cheap) -- set to 0 in the
+                # config to disable.
+                save_every_n_steps = getattr(configs, "save_every_n_steps", 250)
+                if (
+                    save_every_n_steps
+                    and not configs.debug
+                    and not configs.only_eval
+                    and total_train_steps % save_every_n_steps == 0
+                ):
+                    torch.save(
+                        get_trainable_state_dict(model),
+                        os.path.join(
+                            save_dir,
+                            f"periodic_checkpoint_epoch{epoch+1}_step{total_train_steps}",
+                        ),
+                    )
 
                 if wandb_run:
                     log_dict = {
