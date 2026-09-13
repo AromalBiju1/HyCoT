@@ -13,7 +13,7 @@ import torch
 from types import SimpleNamespace
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from coconut import Coconut
-from lora_utils import apply_lora
+from lora_utils import apply_lora, apply_sparse_new_token_patch
 
 MODEL_ID = "huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated"
 # Qwen3.5 vision is a separate mmproj, not baked into the base weights, so
@@ -83,22 +83,30 @@ def main():
     print("=== End architecture check ===\n")
 
     model.resize_token_embeddings(len(tokenizer))
-    embeddings = model.get_input_embeddings()
     target_id = tokenizer.convert_tokens_to_ids("<<")
     if target_id is None or target_id == tokenizer.unk_token_id:
         # fallback anchor token if "<<" isn't in Qwen3.5's vocab
         target_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
         print(f"'<<' not found, using eos_token_id={target_id} as embedding anchor")
-    for token_id in [latent_id, start_id, end_id]:
-        embeddings.weight.data[token_id] = embeddings.weight.data[target_id]
-        model.lm_head.weight.data[token_id] = model.lm_head.weight.data[target_id]
+    # NOTE: no longer manually copying embeddings.weight.data[token_id] /
+    # lm_head.weight.data[token_id] here -- apply_sparse_new_token_patch()
+    # below does that init (via init_from_id) as part of setting up the
+    # sparse trainable table for these 3 ids, AFTER LoRA wrapping.
 
-    # LoRA wrap before Coconut, same ordering as run_single_gpu.py. Use
-    # SimpleNamespace here instead of a real yaml Config since this smoke
-    # test has no config file -- apply_lora only reads getattr(configs, ...)
-    # with defaults, so an empty namespace is enough to get r=16/alpha=32.
+    # LoRA wrap before the sparse patch, same ordering as run_single_gpu.py.
+    # Use SimpleNamespace here instead of a real yaml Config since this
+    # smoke test has no config file -- apply_lora only reads
+    # getattr(configs, ...) with defaults, so an empty namespace is enough
+    # to get r=16/alpha=32.
     lora_configs = SimpleNamespace()
     model = apply_lora(model, lora_configs)
+
+    # Sparse new-token patch: see lora_utils.apply_sparse_new_token_patch
+    # docstring. Replaces the earlier full-unfreeze-of-embed_tokens/lm_head
+    # approach that OOM'd on real training -- only these 3 rows get their
+    # own small trainable table, the rest of embed_tokens/lm_head stays
+    # frozen.
+    model = apply_sparse_new_token_patch(model, [latent_id, start_id, end_id], target_id)
 
     coconut_model = Coconut(model, latent_id, start_id, end_id, tokenizer.eos_token_id)
     # NOTE: no .to(device) here -- model is already sharded across GPUs by
@@ -164,7 +172,7 @@ def main():
             total_params_with_grad += 1
             if not torch.isfinite(param.grad).all():
                 bad_grads.append(name)
-            if "lora_" not in name:
+            if "lora_" not in name and "special_embedding" not in name and "special_lm_head" not in name:
                 non_lora_with_grad.append(name)
 
     print(f"Params with gradients: {total_params_with_grad}")
@@ -174,18 +182,17 @@ def main():
         raise SystemExit(1)
 
     if non_lora_with_grad:
-        # get_peft_model() freezes everything NOT matched by target_modules,
-        # including embed_tokens/lm_head (Embedding, never matched -- only
-        # nn.Linear leaves are targeted). So this list should be EMPTY. If
-        # it isn't, LoRA wrap didn't freeze what it should have -- possible
-        # causes: target_modules matched a name it shouldn't have, or
-        # get_peft_model was called on the wrong object. Note: this also
-        # means the new latent/start/end token embedding rows written above
-        # are now frozen along with the rest of embed_tokens/lm_head -- if
-        # those rows need to actually learn, add "embed_tokens" and
-        # "lm_head" to modules_to_save in apply_lora()'s LoraConfig, which
-        # keeps them fully trainable (not LoRA-adapted, just unfrozen)
-        # instead of relying on incidental gradient leakage.
+        # get_peft_model() freezes everything NOT matched by target_modules.
+        # embed_tokens/lm_head are frozen too (Embedding/lm_head never match
+        # target_modules -- only nn.Linear leaves inside decoder layers do),
+        # but that's now expected and correct: apply_sparse_new_token_patch()
+        # already gives the 3 new token ids their own small trainable table
+        # (special_embedding/special_lm_head params, which DO contain
+        # "lora_"... no wait, they don't -- they're plain nn.Embedding/
+        # nn.Linear, not LoRA layers). So this list should contain exactly
+        # those: special_embedding.weight and special_lm_head.weight, and
+        # nothing else. Anything beyond those two names is suspicious --
+        # LoRA wrap or the sparse patch didn't freeze what it should have.
         print(
             f"NOTE: {len(non_lora_with_grad)} non-LoRA params have gradients "
             f"(expected: embed_tokens/lm_head rows for the new latent tokens). "
