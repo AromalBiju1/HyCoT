@@ -31,4 +31,5 @@ debug: false
 gradient_accumulation_steps: 1
 num_epochs: 15
 lr: !!float "1e-4"
+wandb_mode: disabled
 weight_decay: 0.01
