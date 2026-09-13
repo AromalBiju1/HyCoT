@@ -360,8 +360,6 @@ def main():
 
     total_train_steps = 0
 
-    if getattr(configs, "wandb_mode", None):
-        os.environ["WANDB_MODE"] = configs.wandb_mode
     if not configs.debug and not configs.only_eval:
         wandb_run = wandb.init(project=configs.project, name=configs.name)
         wandb_run.config.update(configs, allow_val_change=True)
@@ -392,6 +390,18 @@ def main():
             end_id,
             no_special_marker=configs.cot or configs.no_cot or configs.no_thoughts,
         )
+
+        # eval_max_examples caps ONLY this generation-based accuracy set, not
+        # the cheap forward-pass "eval loss" above -- the whole cost problem
+        # is model.generate() (autoregressive, ~15-23s/example observed),
+        # not the loss computation (single forward pass, negligible). Full
+        # val set (~500 examples here) x ~18s/example x every epoch is the
+        # actual 2+ hour/epoch bottleneck; capping this to e.g. 50 gives a
+        # real accuracy signal in minutes instead of hours, at the cost of
+        # a noisier estimate. Unset (None) keeps the full original behavior.
+        eval_max_examples = getattr(configs, "eval_max_examples", None)
+        if eval_max_examples and len(dataset_gen_val) > eval_max_examples:
+            dataset_gen_val = dataset_gen_val.select(range(eval_max_examples))
 
         # sequential sampling (no DistributedSampler needed for a single device)
         valid_gen_dataloader = torch.utils.data.DataLoader(
@@ -651,83 +661,104 @@ def main():
                     wandb_run.log(log_dict)
                     print("eval loss", total_loss / len(valid_loss_dataloader))
 
-        # val generation accuracy
-        total_length = len(valid_gen_dataloader)
-        pbar = tqdm(
-            colour="blue", desc="Test Accuracy", total=total_length, dynamic_ncols=True
+        # eval_every_n_epochs gates ONLY the expensive generation-accuracy
+        # loop below (the val-loss check above always runs -- it's cheap).
+        # Default 1 preserves the original "every epoch" behavior. Always
+        # run it on only_eval mode (that's the whole point of that mode) and
+        # on the final epoch (so you always get a real final accuracy
+        # number even if the interval didn't land on it).
+        eval_every_n_epochs = getattr(configs, "eval_every_n_epochs", 1)
+        is_final_epoch = (epoch + 1) == configs.num_epochs
+        run_full_eval = (
+            configs.only_eval
+            or eval_every_n_epochs <= 1
+            or (epoch + 1) % eval_every_n_epochs == 0
+            or is_final_epoch
         )
-        cor, cor_cot, total = 0, 0, 0
 
-        # use_cache was disabled for training (required alongside gradient
-        # checkpointing) but generation is much faster with KV caching and
-        # doesn't need the checkpointing memory tradeoff -- re-enable it just
-        # for this generate() loop. model may be wrapped in Coconut (real
-        # config lives at model.base_causallm.config), or be the plain
-        # AutoModelForCausalLM if configs.coconut is False.
-        gen_config = getattr(model, "base_causallm", model).config
-        gen_config.use_cache = True
-
-        with torch.no_grad():
-            model.eval()
-            for idx, batch in enumerate(valid_gen_dataloader):
-                test_idx = batch["idx"][0]
-
-                batch = {
-                    k: v.to(input_device)
-                    for k, v in batch.items()
-                    if v is not None and k not in ["idx", "position_ids"]
-                }
-
-                assert len(batch["input_ids"]) == 1
-                answer = answers_val[test_idx.cpu().item()]
-                answer_cot = cot_val[test_idx.cpu().item()]
-                question = question_val[test_idx.cpu().item()]
-
-                total += 1
-
-                # synced_gpus was an FSDP requirement -- always False single-GPU
-                outputs = model.generate(
-                    **batch, max_new_tokens=max_new_tokens, synced_gpus=False
-                )
-
-
-                text_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                answer_output = text_output.split("#")[-1].replace(",", "").strip()
-                cot_output = ("\n".join(text_output.split("\n")[1:])).split("#")[0].strip()
-
-                if idx < 5:
-                    print(f"Question {test_idx}: Answer = '{answer}' CoT = '{answer_cot}'")
-                    print(f"Full output: '{tokenizer.decode(outputs[0])}'")
-                    print(f"Extracted Output: '{answer_output}'")
-
-                cor += answer_output == answer
-                cor_cot += cot_output == answer_cot
-
-                pbar.update(1)
-                pbar.set_description(f"Test accuracy: {round(cor / total, 2)}")
-
-            pbar.close()
-            print(f"Cor={cor}, CoT={cor_cot}, Total={total}")
-
-        print(f"Accuracy on validation set: {cor} / {total} = {cor/total}")
-        print(f"CoT match on validation set: {cor_cot} / {total} = {cor_cot/total}")
-        sys.stdout.flush()
-
-        if wandb_run:
-            wandb_run.log({"eval/acc": cor / total, "eval/cot_em": cor_cot / total})
-
-        if configs.only_eval:
-            break
-
-        if cor / total > best_acc and configs.save_only_improve and not configs.debug and not configs.only_eval:
-            torch.save(
-                get_trainable_state_dict(model),
-                os.path.join(save_dir, f"checkpoint_{epoch + 1}"),
+        if not run_full_eval:
+            print(
+                f"Skipping generation-based eval this epoch (epoch {epoch+1}, "
+                f"eval_every_n_epochs={eval_every_n_epochs}) -- val loss above "
+                f"still ran."
             )
-            print("saving model (trainable params only).")
-            best_acc = cor / total
-            gc.collect()
-            torch.cuda.empty_cache()
+        else:
+            # val generation accuracy
+            total_length = len(valid_gen_dataloader)
+            pbar = tqdm(
+                colour="blue", desc="Test Accuracy", total=total_length, dynamic_ncols=True
+            )
+            cor, cor_cot, total = 0, 0, 0
+
+            # use_cache was disabled for training (required alongside gradient
+            # checkpointing) but generation is much faster with KV caching and
+            # doesn't need the checkpointing memory tradeoff -- re-enable it just
+            # for this generate() loop. model may be wrapped in Coconut (real
+            # config lives at model.base_causallm.config), or be the plain
+            # AutoModelForCausalLM if configs.coconut is False.
+            gen_config = getattr(model, "base_causallm", model).config
+            gen_config.use_cache = True
+
+            with torch.no_grad():
+                model.eval()
+                for idx, batch in enumerate(valid_gen_dataloader):
+                    test_idx = batch["idx"][0]
+
+                    batch = {
+                        k: v.to(input_device)
+                        for k, v in batch.items()
+                        if v is not None and k not in ["idx", "position_ids"]
+                    }
+
+                    assert len(batch["input_ids"]) == 1
+                    answer = answers_val[test_idx.cpu().item()]
+                    answer_cot = cot_val[test_idx.cpu().item()]
+                    question = question_val[test_idx.cpu().item()]
+
+                    total += 1
+
+                    # synced_gpus was an FSDP requirement -- always False single-GPU
+                    outputs = model.generate(
+                        **batch, max_new_tokens=max_new_tokens, synced_gpus=False
+                    )
+
+                    text_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    answer_output = text_output.split("#")[-1].replace(",", "").strip()
+                    cot_output = ("\n".join(text_output.split("\n")[1:])).split("#")[0].strip()
+
+                    if idx < 5:
+                        print(f"Question {test_idx}: Answer = '{answer}' CoT = '{answer_cot}'")
+                        print(f"Full output: '{tokenizer.decode(outputs[0])}'")
+                        print(f"Extracted Output: '{answer_output}'")
+
+                    cor += answer_output == answer
+                    cor_cot += cot_output == answer_cot
+
+                    pbar.update(1)
+                    pbar.set_description(f"Test accuracy: {round(cor / total, 2)}")
+
+                pbar.close()
+                print(f"Cor={cor}, CoT={cor_cot}, Total={total}")
+
+            print(f"Accuracy on validation set: {cor} / {total} = {cor/total}")
+            print(f"CoT match on validation set: {cor_cot} / {total} = {cor_cot/total}")
+            sys.stdout.flush()
+
+            if wandb_run:
+                wandb_run.log({"eval/acc": cor / total, "eval/cot_em": cor_cot / total})
+
+            if configs.only_eval:
+                break
+
+            if cor / total > best_acc and configs.save_only_improve and not configs.debug and not configs.only_eval:
+                torch.save(
+                    get_trainable_state_dict(model),
+                    os.path.join(save_dir, f"checkpoint_{epoch + 1}"),
+                )
+                print("saving model (trainable params only).")
+                best_acc = cor / total
+                gc.collect()
+                torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
