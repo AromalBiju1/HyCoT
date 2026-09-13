@@ -181,6 +181,7 @@ class Coconut(nn.Module):
 
         super(Coconut, self).__init__()
         self.gen_forward_cnt = 0
+        self._logged_nocache_recompute = False
         self.base_causallm = base_causallm
         self.latent_token_id = latent_token_id
         self.eos_token_id = eos_token_id
@@ -227,23 +228,9 @@ class Coconut(nn.Module):
 
         for pass_idx in range(max_n_latents):
 
-            if kv_cache == None:
-                # first forward pass
-                outputs = self.base_causallm(
-                    inputs_embeds=inputs_embeds[
-                        :, next_compute_range[0] : next_compute_range[1], :
-                    ],
-                    attention_mask=attention_mask[
-                        :, next_compute_range[0] : next_compute_range[1]
-                    ],
-                    position_ids=position_ids[
-                        :, next_compute_range[0] : next_compute_range[1]
-                    ],
-                    output_hidden_states=True,
-                )
-                hidden_states_offset = 0
-
-            else:
+            if kv_cache is not None:
+                # Cached incremental pass: only the new slice is forwarded,
+                # the prefix comes from past_key_values.
                 # Qwen3.5 patch: at batch_size=1 this truncation was always a
                 # no-op (next_compute_range[0] == the cache's current length),
                 # so pass kv_cache straight through instead of slicing it.
@@ -266,7 +253,47 @@ class Coconut(nn.Module):
                 # in `outputs.hidden_states`, [0, k) will be skipped
                 # so we need to keep this offset to correctly use the last hidden states
 
-            logits.append(outputs.logits)
+                logits.append(outputs.logits)
+
+            else:
+                # No-cache pass: kv_cache is None either because this is the
+                # very first pass (nothing cached yet) or because caching is
+                # disabled entirely (gradient checkpointing forces
+                # use_cache=False, so past_key_values comes back None every
+                # pass). In the latter case forwarding only the 1-token
+                # slice [start:end) would produce hidden_states covering
+                # just that slice while the fill logic below indexes it
+                # with absolute sequence positions -- IndexError the moment
+                # stage 1 inserts the first real latent token. So recompute
+                # the full prefix [0:end) and index it absolutely
+                # (offset 0), keeping only the new slice's logits so the
+                # concatenated logits still cover each position exactly once.
+                if pass_idx > 0 and not self._logged_nocache_recompute:
+                    print(
+                        "Coconut: past_key_values is None past the first pass "
+                        "(use_cache=False, e.g. gradient checkpointing) -- "
+                        "using full-prefix recompute per latent pass."
+                    )
+                    self._logged_nocache_recompute = True
+                outputs = self.base_causallm(
+                    inputs_embeds=inputs_embeds[
+                        :, 0 : next_compute_range[1], :
+                    ],
+                    attention_mask=attention_mask[
+                        :, : next_compute_range[1]
+                    ],
+                    position_ids=position_ids[
+                        :, 0 : next_compute_range[1]
+                    ],
+                    output_hidden_states=True,
+                )
+                hidden_states_offset = 0
+
+                logits.append(
+                    outputs.logits[
+                        :, next_compute_range[0] : next_compute_range[1], :
+                    ]
+                )
 
             next_compute_range = (
                 next_compute_range[1],
@@ -325,18 +352,36 @@ class Coconut(nn.Module):
                 ]
             )
 
-        # final pass
-        outputs = self.base_causallm(
-            inputs_embeds=inputs_embeds[
-                :, next_compute_range[0] : next_compute_range[1], :
-            ],
-            attention_mask=attention_mask[:, : next_compute_range[1]],
-            position_ids=position_ids[:, next_compute_range[0] : next_compute_range[1]],
-            past_key_values=kv_cache,  # Qwen3.5 patch: same no-op removal as above, now cloned per pass
-            output_hidden_states=True,
-        )
+        # final pass (same cache/no-cache split as the loop above: with a
+        # cache, forward only the tail slice; without one, recompute the
+        # full sequence and keep only the tail's logits)
+        if kv_cache is not None:
+            outputs = self.base_causallm(
+                inputs_embeds=inputs_embeds[
+                    :, next_compute_range[0] : next_compute_range[1], :
+                ],
+                attention_mask=attention_mask[:, : next_compute_range[1]],
+                position_ids=position_ids[:, next_compute_range[0] : next_compute_range[1]],
+                past_key_values=kv_cache,  # Qwen3.5 patch: same no-op removal as above, now cloned per pass
+                output_hidden_states=True,
+            )
 
-        logits.append(outputs.logits)
+            logits.append(outputs.logits)
+        else:
+            outputs = self.base_causallm(
+                inputs_embeds=inputs_embeds[
+                    :, 0 : next_compute_range[1], :
+                ],
+                attention_mask=attention_mask[:, : next_compute_range[1]],
+                position_ids=position_ids[:, 0 : next_compute_range[1]],
+                output_hidden_states=True,
+            )
+
+            logits.append(
+                outputs.logits[
+                    :, next_compute_range[0] : next_compute_range[1], :
+                ]
+            )
 
         self.gen_forward_cnt += max_n_latents + 1
 
