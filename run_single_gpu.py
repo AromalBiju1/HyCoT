@@ -167,10 +167,6 @@ def main():
     # installed) so the relative overhead here is small. Set
     # disable_cudnn_conv: false in the yaml if you later move to Ampere+
     # hardware and want to re-enable it.
-    disable_cudnn_conv = getattr(
-        __import__("types").SimpleNamespace(), "_unused", None
-    )  # placeholder removed below once configs exists; real gate applied after config load
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     with open(args.config_file) as f:
@@ -185,6 +181,11 @@ def main():
 
     configs = Config(config_dict)
     set_seed(configs.seed)
+
+    disable_cudnn_conv = getattr(configs, "disable_cudnn_conv", True)
+    if disable_cudnn_conv:
+        torch.backends.cudnn.enabled = False
+        print("cuDNN disabled globally (T4 depthwise-conv engine-search workaround).")
     save_dir = os.path.join(configs.save_path, configs.name)
 
     if not os.path.exists(save_dir):
@@ -401,6 +402,8 @@ def main():
     best_acc = 0
 
     collator = MyCollator(tokenizer, latent_id=latent_id, label_pad_token_id=-100)
+
+    print("cudnn.enabled just before training:", torch.backends.cudnn.enabled)
 
     for epoch in range(configs.resume, configs.num_epochs):
 
