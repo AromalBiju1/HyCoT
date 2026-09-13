@@ -4,7 +4,106 @@ The code base is the official implementation of [Training Large Language Models 
 
 ![coconut](assets/coconut.png)
 
-## Getting Started
+> **This fork: Coconut on Qwen3.5 (gated DeltaNet hybrid).**
+> Upstream Coconut was built and tested on GPT-2 / Llama-style pure-attention
+> models. This fork ports it to Qwen3.5 (`huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated`),
+> a **hybrid gated-DeltaNet + full-attention** architecture that upstream never
+> covered. That architecture breaks several assumptions in the original code,
+> so this fork carries Qwen3.5-specific fixes (all marked with `Qwen3.5 patch`
+> / explanatory comments in the source):
+>
+> - **Cache is not sliceable KV.** Original `coconut.py` truncated
+>   `past_key_values` per pass (`k[:, :, :n, :]`). Qwen3.5's cache holds
+>   per-layer `LinearAttentionLayer` objects with `recurrent_states` /
+>   `conv_states` that cannot be sliced like attention KV, so the cache is
+>   passed through whole instead (`coconut.py`, `apply_qwen35_patch.py` keeps
+>   the original one-shot patch for reference).
+> - **In-place cache updates vs autograd.** Transformers' `LinearAttentionLayer`
+>   mutates its state buffers with `.copy_()` (a CUDA-graph inference
+>   optimization). That overwrites tensors autograd saved for backward, so any
+>   `use_cache=True` + `.backward()` run fails. Fixed by monkey-patching both
+>   update methods to reassign out-of-place, plus cloning DeltaNet states
+>   between Coconut's re-entrant passes (`_patch_linear_attention_cache_for_training`,
+>   `_clone_cache_states` in `coconut.py`).
+> - **No KV cache under gradient checkpointing.** Checkpointing forces
+>   `use_cache=False`, so `past_key_values` comes back `None` every pass and
+>   the multi-pass loop used to `IndexError` on the first latent-token epoch.
+>   Fixed with full-prefix recompute per pass (offset 0, new-slice-only logits)
+>   when no cache is present (`coconut.py` `forward`).
+> - **Single-process multi-GPU.** `device_map="auto"` model-parallel sharding
+>   is used instead of DDP; dataset/distributed guards, device placement, and
+>   checkpoint save/load are adapted accordingly (`dataset.py`,
+>   `run_single_gpu.py`, `lora_utils.py`).
+>
+> Everything below the next section is upstream's documentation, kept for
+> reference. The Qwen3.5 workflow (scripts, extra config keys, hardware notes)
+> is documented in the **Qwen3.5 fork** section that follows it.
+>
+> ## Qwen3.5 fork usage
+>
+> ### Scripts
+>
+> - **`run_single_gpu.py`** — the training entry point for this fork (replaces
+>   `torchrun ... run.py`). Single process, `device_map="auto"` sharding,
+>   LoRA by default. Accepts CLI overrides for any config key:
+>   `python run_single_gpu.py args/gsm_coconut.yaml --lr 5e-5 --debug true`.
+> - **`smoke_test_coconut.py`** — fast pre-flight check (forward + backward +
+>   gradient sanity on a hand-built example). Run before any real training run.
+> - **`lora_utils.py`** — shared LoRA wrap (`apply_lora`), trainable-only
+>   checkpointing (`get_trainable_state_dict`), and the sparse new-token patch
+>   (`apply_sparse_new_token_patch`): the full embedding/LM-head matrices stay
+>   frozen and only the 3 special latent tokens get tiny trainable tables
+>   (~15K params instead of ~1.3B).
+> - **`apply_qwen35_patch.py`** — the original one-shot script version of the
+>   Qwen3.5 cache patch; kept for reference, already applied in `coconut.py`.
+>
+> ### Extra config keys (on top of upstream's list below)
+>
+> - **use_lora** (default `true`) — LoRA adapters instead of full finetune.
+>   `false` falls back to the full-finetune path.
+> - **lora_r / lora_alpha / lora_dropout** (defaults `16 / 32 / 0.05`) —
+>   LoRA rank/alpha/dropout. `lora_target_modules` / `lora_modules_to_save`
+>   are also read if set; target modules are otherwise auto-detected from the
+>   model's linear layers.
+> - **force_8bit_optimizer** (default `false`) — use bitsandbytes
+>   `PagedAdamW8bit` over LoRA params. Only needed if something big is
+>   unfrozen; plain AdamW over the adapters is the default.
+> - **clip_grad_norm** (default `1.0`) — gradient clipping max norm; `0`
+>   disables. Prevents the unclipped-blowup → NaN failure mode.
+> - **save_every_n_steps** (default `250`) — periodic mid-epoch checkpoints
+>   (`periodic_checkpoint_epoch{N}_step{M}`); `0` disables. These use a
+>   distinct prefix so the epoch-based auto-resume ignores them (resume from
+>   one manually by path if a session dies mid-epoch).
+> - **eval_max_examples** (default unset = full set) — caps only the
+>   expensive `generate()`-based accuracy eval, not the cheap forward-pass
+>   eval loss.
+> - **eval_every_n_epochs** (default `1`) — run the generation eval only
+>   every N epochs (plus always on the final epoch and in `only_eval` mode).
+> - **wandb_mode** — e.g. `disabled`; forwarded to `WANDB_MODE` before
+>   `wandb.init` so logging never blocks on an interactive login prompt.
+> - **disable_cudnn_conv** (default `true`) — disables cuDNN globally as a
+>   workaround for cuDNN's engine search failing on T4 (sm_75, no bf16 conv
+>   support) once latent tokens change input shapes. Re-enable on Ampere+.
+>
+> NaN/Inf loss or gradients stop the run immediately with a clearly-labeled
+> emergency checkpoint (`nan_checkpoint_*` / `nangrad_checkpoint_*`) instead
+> of silently training on garbage.
+>
+> ### Hardware notes
+>
+> Developed and run on 2× T4 (14.56 GiB each, Kaggle). The memory stack that
+> makes a ~4B model fit there: `device_map="auto"` sharding + bf16 +
+> gradient checkpointing (`use_cache=False`, see the no-cache fix above) +
+> LoRA (~32.5M trainable of ~4.24B total, ~0.77%) + `PYTORCH_CUDA_ALLOC_CONF`
+> expandable segments. Reference (non-fused) kernels are used throughout
+> because `flash-linear-attention` / `causal_conv1d` wheels are typically
+> unavailable there — expect slow steps; that is normal, not a bug.
+>
+> ---
+>
+> *Upstream documentation follows.*
+>
+> ## Getting Started
 Clone repo:
 ```
 git clone git@github.com:facebookresearch/coconut.git
