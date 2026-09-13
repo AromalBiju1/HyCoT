@@ -38,43 +38,45 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def make_optimizer(model, configs):
-    # Vanilla torch.optim.AdamW keeps exp_avg + exp_avg_sq in fp32 -- 8
-    # bytes/param of optimizer state. For a ~4B-param model that's ~32GB,
-    # which does not fit alongside ~8GB bf16 weights + ~8GB bf16 grads in
-    # 2x14.56GiB T4s (OOM'd on the very first optimizer.step()).
-    #
-    # bitsandbytes' PagedAdamW8bit (not plain AdamW8bit) is used here
-    # specifically: even with 8-bit-quantized state (~8GB total, vs ~32GB
-    # fp32), steady-state usage (weights+grad+optimizer ~24GB of ~29GB
-    # combined budget) leaves only ~5GB for activations across both GPUs --
-    # razor-thin, so a longer-than-average training example still spikes
-    # past it (observed: OOM inside backward() on later, longer batches even
-    # after gradient checkpointing helped). PagedAdamW8bit uses CUDA unified
-    # memory so those spikes page optimizer state out to host RAM instead of
-    # hard-crashing, at a speed cost only during the actual spike -- this is
-    # the correct lever for "occasional long example causes a memory spike",
-    # as opposed to truncating sequences (a data hack) or shrinking batch
-    # size further (already at the floor of 1).
-    try:
+    # Pre-LoRA this had to reach for bitsandbytes' PagedAdamW8bit, because
+    # vanilla AdamW's fp32 optimizer state (~8 bytes/param) on a full ~4B-
+    # param finetune is ~32GB -- doesn't fit on 2x14.56GiB T4 alongside
+    # weights+grads. With LoRA, model.parameters() with requires_grad=True
+    # is now only the adapter matrices (megabytes, not billions of params),
+    # so that whole memory wall is gone -- optimizer state for LoRA params
+    # is negligible regardless of precision. Plain AdamW is the right
+    # default now; the 8-bit path is kept only as an explicit opt-in in case
+    # you later unfreeze something big (e.g. the MLP bridge, if it's large)
+    # and want the memory headroom back.
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    n_trainable = sum(p.numel() for p in trainable_params)
+    n_total = sum(p.numel() for p in model.parameters())
+    print(
+        f"Optimizer covers {n_trainable:,} trainable params "
+        f"out of {n_total:,} total ({100 * n_trainable / n_total:.3f}%)."
+    )
+    if n_trainable == 0:
+        raise ValueError(
+            "No trainable parameters found -- LoRA wrap likely didn't run, or "
+            "target_modules matched nothing. Check apply_lora() logs above "
+            "for the detected target_modules list before training."
+        )
+
+    if getattr(configs, "force_8bit_optimizer", False):
         import bitsandbytes as bnb
-        print("Using bitsandbytes PagedAdamW8bit (quantized + CPU-paged optimizer state).")
+        print("Using bitsandbytes PagedAdamW8bit (forced via config: force_8bit_optimizer).")
         return bnb.optim.PagedAdamW8bit(
-            model.parameters(), lr=configs.lr, weight_decay=configs.weight_decay
+            trainable_params, lr=configs.lr, weight_decay=configs.weight_decay
         )
-    except ImportError:
-        print(
-            "WARNING: bitsandbytes not installed -- falling back to vanilla "
-            "torch.optim.AdamW. Its fp32 optimizer state (~8 bytes/param) will "
-            "very likely OOM on 2x T4 for a model this size. Run "
-            "`pip install bitsandbytes` before training, not just for the smoke test."
-        )
-        return optim.AdamW(
-            model.parameters(), lr=configs.lr, weight_decay=configs.weight_decay
-        )
+
+    return optim.AdamW(
+        trainable_params, lr=configs.lr, weight_decay=configs.weight_decay
+    )
 
 import wandb
 
 from coconut import Coconut
+from lora_utils import apply_lora, get_trainable_state_dict
 from dataset import (
     get_dataset,
     get_question_latent_dataset,
@@ -171,6 +173,15 @@ def main():
     # gradient_checkpointing_enable() either.
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
+    # Required when the backbone is frozen (LoRA) + gradient checkpointing is
+    # on: checkpointing recomputes activations during backward starting from
+    # the recorded input, but if that input itself has requires_grad=False
+    # (true for embed_tokens' output once the backbone is frozen), autograd
+    # has nothing to hook the recomputed graph onto and silently produces no
+    # gradient at all for anything downstream. This forces the input
+    # embeddings' output to require grad regardless of the embedding layer's
+    # own frozen weights, which is exactly what checkpointing needs here.
+    model.enable_input_require_grads()
     print("Gradient checkpointing enabled (trades compute for activation memory).")
 
     tokenizer = AutoTokenizer.from_pretrained(configs.model_id)
@@ -226,6 +237,20 @@ def main():
     if configs.no_thoughts:
         configs.c_thought = 0
         configs.coconut = False
+
+    # LoRA wrap happens here: after resize_token_embeddings/new-token init
+    # above (so the resized embedding matrix's raw weights get copied in
+    # before anything is frozen), and before Coconut wraps the model (so
+    # Coconut's base_causallm is the PeftModel -- Coconut just proxies
+    # forward()/get_input_embeddings() calls through, doesn't care whether
+    # the object underneath is a raw AutoModelForCausalLM or a PeftModel).
+    # Default on; set use_lora: false in the yaml config to fall back to the
+    # old full-finetune path (e.g. for A/B-testing whether LoRA changes
+    # anything besides memory).
+    if getattr(configs, "use_lora", True):
+        model = apply_lora(model, configs)
+    else:
+        print("use_lora=false in config -- running full finetune (all params trainable).")
 
     if configs.coconut:
         model = Coconut(model, latent_id, start_id, end_id, tokenizer.eos_token_id)
@@ -416,10 +441,15 @@ def main():
             pbar.close()
 
             if not configs.save_only_improve and not configs.debug and not configs.only_eval:
+                # trainable-only save: with LoRA this is the adapter matrices
+                # (megabytes), not the full frozen 4B backbone (gigabytes).
+                # See get_trainable_state_dict() docstring for why plain
+                # model.state_dict() would silently defeat the point of LoRA.
                 torch.save(
-                    model.state_dict(), os.path.join(save_dir, f"checkpoint_{epoch + 1}")
+                    get_trainable_state_dict(model),
+                    os.path.join(save_dir, f"checkpoint_{epoch + 1}"),
                 )
-                print("saving model.")
+                print("saving model (trainable params only).")
                 gc.collect()
                 torch.cuda.empty_cache()
 
@@ -511,8 +541,11 @@ def main():
             break
 
         if cor / total > best_acc and configs.save_only_improve and not configs.debug and not configs.only_eval:
-            torch.save(model.state_dict(), os.path.join(save_dir, f"checkpoint_{epoch + 1}"))
-            print("saving model.")
+            torch.save(
+                get_trainable_state_dict(model),
+                os.path.join(save_dir, f"checkpoint_{epoch + 1}"),
+            )
+            print("saving model (trainable params only).")
             best_acc = cor / total
             gc.collect()
             torch.cuda.empty_cache()
