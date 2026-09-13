@@ -4,6 +4,7 @@
 # LoRA-wrap logic, and trainable-only state-dict save. Duplicating this in
 # both files would drift the moment one gets edited and not the other.
 
+import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model, TaskType
 
