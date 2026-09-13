@@ -4,7 +4,6 @@
 # LoRA-wrap logic, and trainable-only state-dict save. Duplicating this in
 # both files would drift the moment one gets edited and not the other.
 
-import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model, TaskType
 
@@ -166,6 +165,16 @@ class SparseTrainableEmbeddingPatch(nn.Module):
 
         hidden_size = base_embedding.embedding_dim
         self.special_embedding = nn.Embedding(len(self.special_token_ids), hidden_size)
+        # base_embedding.weight lives wherever device_map="auto" put this
+        # shard (not necessarily cuda:0, and not necessarily the same
+        # device as other layers) -- a freshly-constructed nn.Embedding
+        # defaults to CPU/fp32 regardless, so without this it silently ends
+        # up on a different device than the input_ids it's indexed with,
+        # and F.embedding hard-errors on device mismatch instead of
+        # auto-transferring.
+        self.special_embedding = self.special_embedding.to(
+            device=base_embedding.weight.device, dtype=base_embedding.weight.dtype
+        )
 
         if init_from_id is not None:
             with torch.no_grad():
@@ -228,6 +237,11 @@ class SparseTrainableLMHeadPatch(nn.Module):
         self.special_token_ids = list(special_token_ids)
         hidden_size = base_lm_head.in_features
         self.special_lm_head = nn.Linear(hidden_size, len(self.special_token_ids), bias=False)
+        # See SparseTrainableEmbeddingPatch's identical fix above -- same
+        # device_map="auto" issue applies to lm_head's shard too.
+        self.special_lm_head = self.special_lm_head.to(
+            device=base_lm_head.weight.device, dtype=base_lm_head.weight.dtype
+        )
 
         if init_from_id is not None:
             with torch.no_grad():
