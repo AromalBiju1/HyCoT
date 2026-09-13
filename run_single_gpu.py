@@ -94,11 +94,55 @@ import argparse
 from utils import Config, set_seed
 
 
+def _parse_cli_overrides(unknown_args):
+    """
+    Parse any number of --key value (or --key=value) pairs into a dict.
+
+    Why this exists instead of parser.add_argument("--clip-grad-norm", ...)
+    per config key: this project's yaml config keeps growing new keys
+    (clip_grad_norm, save_every_n_steps, use_lora, lora_r,
+    lora_target_modules, train_subset_size, ... and whatever's added next)
+    as it's iterated on. Hardcoding a flag per key means editing this
+    parser every single time one gets added -- fragile busywork that will
+    silently drift out of sync (add a new yaml key, forget to also add its
+    --flag here, CLI override for it quietly does nothing). Accepting
+    arbitrary --key value instead makes every current AND future config key
+    overridable with zero changes to this file, ever.
+
+    Values are parsed with yaml.safe_load so "true"/"500"/"1.0e-4" come
+    through as bool/int/float instead of always landing as the string
+    "true"/"500"/"1.0e-4" -- matters because Config's downstream code does
+    e.g. `if configs.debug:` and `configs.lr * ...`, not string comparisons.
+    """
+    overrides = {}
+    i = 0
+    while i < len(unknown_args):
+        token = unknown_args[i]
+        if not token.startswith("--"):
+            raise ValueError(
+                f"Unrecognized argument (expected --key value or --key=value): {token!r}"
+            )
+        key = token[2:]
+        if "=" in key:
+            key, value_str = key.split("=", 1)
+        else:
+            if i + 1 >= len(unknown_args):
+                raise ValueError(f"--{key} given with no value")
+            value_str = unknown_args[i + 1]
+            i += 1
+        overrides[key] = yaml.safe_load(value_str)
+        i += 1
+    return overrides
+
+
 def main():
 
     parser = argparse.ArgumentParser(description="coconut-single-gpu")
     parser.add_argument("config_file")
-    args = parser.parse_args()
+    # parse_known_args (not parse_args): anything not matched above (every
+    # --key value pair) is collected in `unknown` and handled by
+    # _parse_cli_overrides, instead of argparse rejecting it as unrecognized.
+    args, unknown = parser.parse_known_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # NOTE: `device` above is now only a fallback/reference value (e.g. for
@@ -107,6 +151,11 @@ def main():
 
     with open(args.config_file) as f:
         config_dict = yaml.safe_load(f)
+
+    cli_overrides = _parse_cli_overrides(unknown)
+    if cli_overrides:
+        print(f"CLI overrides applied on top of {args.config_file}: {cli_overrides}")
+        config_dict.update(cli_overrides)
 
     print("Config:", config_dict)
 
@@ -311,8 +360,6 @@ def main():
 
     total_train_steps = 0
 
-    if getattr(configs, "wandb_mode", None):
-        os.environ["WANDB_MODE"] = configs.wandb_mode
     if not configs.debug and not configs.only_eval:
         wandb_run = wandb.init(project=configs.project, name=configs.name)
         wandb_run.config.update(configs, allow_val_change=True)
@@ -511,6 +558,24 @@ def main():
                             ),
                         )
                         raise SystemExit(1) from None
+
+                    # Gradient clipping: yesterday's full-finetune run went
+                    # NaN via exponential loss growth -- the classic
+                    # signature of an unclipped gradient blowup (one large
+                    # update produces a worse next step, compounding). The
+                    # NaN/Inf checks above catch that AFTER it happens and
+                    # stop cleanly, but don't prevent it. LoRA's much
+                    # smaller update magnitude makes a repeat less likely,
+                    # but "less likely" isn't "fixed" -- clipping is the
+                    # actual preventive lever, not a guess. max_norm=1.0 is
+                    # a standard default (configurable via clip_grad_norm in
+                    # the yaml); set clip_grad_norm: 0 to disable.
+                    clip_grad_norm = getattr(configs, "clip_grad_norm", 1.0)
+                    if clip_grad_norm and clip_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in model.parameters() if p.requires_grad],
+                            max_norm=clip_grad_norm,
+                        )
 
                     optimizer.step()
                     optimizer.zero_grad()
