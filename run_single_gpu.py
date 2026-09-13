@@ -360,6 +360,8 @@ def main():
 
     total_train_steps = 0
 
+    if getattr(configs, "wandb_mode", None):
+        os.environ["WANDB_MODE"] = configs.wandb_mode
     if not configs.debug and not configs.only_eval:
         wandb_run = wandb.init(project=configs.project, name=configs.name)
         wandb_run.config.update(configs, allow_val_change=True)
