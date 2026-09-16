@@ -1,0 +1,63 @@
+Skipping import of cpp extensions due to incompatible torch version. Please upgrade to torch >= 2.11.0 (found 2.10.0+cu128).
+CLI overrides applied on top of args/gsm_coconut.yaml: {'train_path': 'data/gsm_train_500.json', 'debug': False, 'clip_grad_norm': 1.0, 'num_epochs': 10, 'eval_max_examples': 50, 'eval_every_n_epochs': 3, 'save_path': '/kaggle/working/checkpoints_r64'}
+Config: {'project': 'coconut', 'save_path': '/kaggle/working/checkpoints_r64', 'name': 'gsm-coconut', 'only_eval': False, 'coconut': True, 'cot': False, 'no_thoughts': False, 'no_cot': False, 'c_thought': 2, 'epochs_per_stage': 3, 'max_latent_stage': 3, 'pad_latent_to_max': True, 'save_only_improve': False, 'uniform_prob': 0.0, 'model_id': 'huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated', 'load_model_path': 'None', 'seed': 0, 'resume': 0, 'bf16': True, 'train_path': 'data/gsm_train_500.json', 'val_path': 'data/gsm_valid.json', 'reset_optimizer': True, 'batch_size_training': 1, 'debug': False, 'gradient_accumulation_steps': 1, 'num_epochs': 10, 'lr': 0.0001, 'wandb_mode': 'disabled', 'weight_decay': 0.01, 'lora_r': 64, 'lora_alpha': 128, 'clip_grad_norm': 1.0, 'eval_max_examples': 50, 'eval_every_n_epochs': 3}
+cuDNN disabled globally (T4 depthwise-conv engine-search workaround).
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Downloading (incomplete total...): 0.00B [00:00, ?B/s]
+Fetching 2 files: 100%|████████████████████████| 2/2 [00:00<00:00, 31536.12it/s]
+Download complete: : 0.00B [00:00, ?B/s]
+Loading weights: 100%|███████████████████████| 426/426 [00:02<00:00, 182.23it/s]
+Gradient checkpointing enabled (trades compute for activation memory).
+LoRA target_modules (auto-detected from model): ['down_proj', 'gate_proj', 'in_proj_a', 'in_proj_b', 'in_proj_qkv', 'in_proj_z', 'k_proj', 'o_proj', 'out_proj', 'q_proj', 'up_proj', 'v_proj']
+trainable params: 129,859,584 || all params: 4,334,996,480 || trainable%: 2.9956
+Sparse new-token patch applied: 3 special token ids, 15,360 new trainable params (vs. 1,270,169,600 if embed_tokens+lm_head were fully unfrozen instead).
+Sharded model loaded via device_map='auto'; input_device=cuda:0
+cudnn.enabled just before training: False
+Optimizer covers 129,874,944 trainable params out of 4,335,011,840 total (2.996%).
+
+=== EPOCH 1 (stage 0, 0 latent tokens) ===
+Training Epoch: 1/10, batch 499/500 completed (loss: 0.8398)
+saving model (trainable params only).
+eval loss 0.3666811065673828
+Skipping generation-based eval this epoch (epoch 1, eval_every_n_epochs=3) -- val loss above still ran.
+
+=== EPOCH 2 (stage 0, 0 latent tokens) ===
+Training Epoch: 2/10, batch 499/500 completed (loss: 0.3672)
+saving model (trainable params only).
+eval loss 0.40145651245117187
+Skipping generation-based eval this epoch (epoch 2, eval_every_n_epochs=3) -- val loss above still ran.
+
+=== EPOCH 3 (stage 0, 0 latent tokens) ===
+Training Epoch: 3/10, batch 499/500 completed (loss: 0.0095)
+saving model (trainable params only).
+eval loss 0.3817521820068359
+
+--- Generation-based eval (eval_every_n_epochs=3) ---
+Question 0: Answer = '300' CoT = '<<4-2=2>> <<2/.5=4>> <<12/4=3>> <<100*3=300>>'
+  Output: '<|start-latent|><|end-latent|><<2+0.5=2.5>> <<2.5+0.5=3>> <<3+0.5=3.5>> <<3.5+0.5=4>> <<4-2=2>> <<2+0.5=2'
+  Extracted: (wrong)
+
+Question 1: Answer = '10' CoT = '<<1.5*2=3>> <<3+2.5=5.5>> <<1.5+3+5.5=10>>'
+  Output: '<|start-latent|><|end-latent|><<1.5*2=3>> <<3+2.5=5.5>> <<1.5+3+5.5=10>> ### 10'
+  Extracted: '10' (correct)
+
+Question 2: Answer = '1400' CoT = '<<30/100*2000=600>> <<2000-600=1400>>'
+  Output: '<|start-latent|><|end-latent|><<2000*0.3=600>> <<2000-600=1400>> ### 1400'
+  Extracted: '1400' (correct)
+
+Question 3: Answer = '15' CoT = '<<21/7=3>> <<5*3=15>>'
+  Output: '<|start-latent|><|end-latent|><<21/7=3>> <<3*5=15>> ### 15'
+  Extracted: '15' (correct)
+
+Question 4: Answer = '240' CoT = '<<200*3=600>> <<600*.4=240>>'
+  Output: '<|start-latent|><|end-latent|><<200*3=600>> <<600*0.4=240>> ### 240'
+  Extracted: '240' (correct)
+
+Cor=18, CoT=0, Total=50
+Accuracy on validation set: 18 / 50 = 0.36
+CoT match on validation set: 0 / 50 = 0.0
+
+=== EPOCH 4 (stage 1, latent tokens inserted) ===
+Coconut: past_key_values is None past the first pass (use_cache=False, e.g. gradient checkpointing) -- using full-prefix recompute per latent pass.
+Training Epoch: 4/10, batch 12/500 completed (loss: 0.3086) ...
