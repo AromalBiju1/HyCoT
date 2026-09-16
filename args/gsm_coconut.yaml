@@ -33,3 +33,5 @@ num_epochs: 15
 lr: !!float "1e-4"
 wandb_mode: disabled
 weight_decay: 0.01
+lora_r: 64
+lora_alpha: 128
