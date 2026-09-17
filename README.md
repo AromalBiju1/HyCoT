@@ -1,276 +1,216 @@
-# Coconut
+# Latent Reasoning on Hybrid Linear-Attention Architectures
 
-The code base is the official implementation of [Training Large Language Models to Reason in a Continuous Latent Space](https://arxiv.org/abs/2412.06769).
+**Does continuous latent thought (Coconut) transfer to hybrid gated-DeltaNet
++ full-attention models, or does it break down when half the network already
+carries its own recurrent state?**
 
-![coconut](assets/coconut.png)
+This project started as a port of Meta's [Coconut](https://arxiv.org/abs/2412.06769)
+("Training Large Language Models to Reason in a Continuous Latent Space") onto
+Qwen3.5-4B, a **hybrid gated-DeltaNet + full-attention** architecture
+(24 linear-attention layers : 8 full-attention layers). It is now a standalone
+repo, detached from any upstream fork relationship. The original Coconut
+codebase and paper are from Meta; this repo adapts the method to an
+architecture family the original work never covered, documents what breaks
+when you do that, and reports what happens to task accuracy when it works.
 
-> **This fork: Coconut on Qwen3.5 (gated DeltaNet hybrid).**
-> Upstream Coconut was built and tested on GPT-2 / Llama-style pure-attention
-> models. This fork ports it to Qwen3.5 (`huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated`),
-> a **hybrid gated-DeltaNet + full-attention** architecture that upstream never
-> covered. That architecture breaks several assumptions in the original code,
-> so this fork carries Qwen3.5-specific fixes (all marked with `Qwen3.5 patch`
-> / explanatory comments in the source):
->
-> - **Cache is not sliceable KV.** Original `coconut.py` truncated
->   `past_key_values` per pass (`k[:, :, :n, :]`). Qwen3.5's cache holds
->   per-layer `LinearAttentionLayer` objects with `recurrent_states` /
->   `conv_states` that cannot be sliced like attention KV, so the cache is
->   passed through whole instead (`coconut.py`, `apply_qwen35_patch.py` keeps
->   the original one-shot patch for reference).
-> - **In-place cache updates vs autograd.** Transformers' `LinearAttentionLayer`
->   mutates its state buffers with `.copy_()` (a CUDA-graph inference
->   optimization). That overwrites tensors autograd saved for backward, so any
->   `use_cache=True` + `.backward()` run fails. Fixed by monkey-patching both
->   update methods to reassign out-of-place, plus cloning DeltaNet states
->   between Coconut's re-entrant passes (`_patch_linear_attention_cache_for_training`,
->   `_clone_cache_states` in `coconut.py`).
-> - **No KV cache under gradient checkpointing.** Checkpointing forces
->   `use_cache=False`, so `past_key_values` comes back `None` every pass and
->   the multi-pass loop used to `IndexError` on the first latent-token epoch.
->   Fixed with full-prefix recompute per pass (offset 0, new-slice-only logits)
->   when no cache is present (`coconut.py` `forward`).
-> - **Single-process multi-GPU.** `device_map="auto"` model-parallel sharding
->   is used instead of DDP; dataset/distributed guards, device placement, and
->   checkpoint save/load are adapted accordingly (`dataset.py`,
->   `run_single_gpu.py`, `lora_utils.py`).
->
-> Everything below the next section is upstream's documentation, kept for
-> reference. The Qwen3.5 workflow (scripts, extra config keys, hardware notes)
-> is documented in the **Qwen3.5 fork** section that follows it.
->
-> ## Qwen3.5 fork usage
->
-> ### Scripts
->
-> - **`run_single_gpu.py`** — the training entry point for this fork (replaces
->   `torchrun ... run.py`). Single process, `device_map="auto"` sharding,
->   LoRA by default. Accepts CLI overrides for any config key:
->   `python run_single_gpu.py args/gsm_coconut.yaml --lr 5e-5 --debug true`.
-> - **`smoke_test_coconut.py`** — fast pre-flight check (forward + backward +
->   gradient sanity on a hand-built example). Run before any real training run.
-> - **`lora_utils.py`** — shared LoRA wrap (`apply_lora`), trainable-only
->   checkpointing (`get_trainable_state_dict`), and the sparse new-token patch
->   (`apply_sparse_new_token_patch`): the full embedding/LM-head matrices stay
->   frozen and only the 3 special latent tokens get tiny trainable tables
->   (~15K params instead of ~1.3B).
-> - **`apply_qwen35_patch.py`** — the original one-shot script version of the
->   Qwen3.5 cache patch; kept for reference, already applied in `coconut.py`.
->
-> ### Extra config keys (on top of upstream's list below)
->
-> - **use_lora** (default `true`) — LoRA adapters instead of full finetune.
->   `false` falls back to the full-finetune path.
-> - **lora_r / lora_alpha / lora_dropout** (defaults `16 / 32 / 0.05`) —
->   LoRA rank/alpha/dropout. `lora_target_modules` / `lora_modules_to_save`
->   are also read if set; target modules are otherwise auto-detected from the
->   model's linear layers.
-> - **force_8bit_optimizer** (default `false`) — use bitsandbytes
->   `PagedAdamW8bit` over LoRA params. Only needed if something big is
->   unfrozen; plain AdamW over the adapters is the default.
-> - **clip_grad_norm** (default `1.0`) — gradient clipping max norm; `0`
->   disables. Prevents the unclipped-blowup → NaN failure mode.
-> - **save_every_n_steps** (default `250`) — periodic mid-epoch checkpoints
->   (`periodic_checkpoint_epoch{N}_step{M}`); `0` disables. These use a
->   distinct prefix so the epoch-based auto-resume ignores them (resume from
->   one manually by path if a session dies mid-epoch).
-> - **eval_max_examples** (default unset = full set) — caps only the
->   expensive `generate()`-based accuracy eval, not the cheap forward-pass
->   eval loss.
-> - **eval_every_n_epochs** (default `1`) — run the generation eval only
->   every N epochs (plus always on the final epoch and in `only_eval` mode).
-> - **wandb_mode** — e.g. `disabled`; forwarded to `WANDB_MODE` before
->   `wandb.init` so logging never blocks on an interactive login prompt.
-> - **disable_cudnn_conv** (default `true`) — disables cuDNN globally as a
->   workaround for cuDNN's engine search failing on T4 (sm_75, no bf16 conv
->   support) once latent tokens change input shapes. Re-enable on Ampere+.
->
-> NaN/Inf loss or gradients stop the run immediately with a clearly-labeled
-> emergency checkpoint (`nan_checkpoint_*` / `nangrad_checkpoint_*`) instead
-> of silently training on garbage.
->
-> ### Hardware notes
->
-> Developed and run on 2× T4 (14.56 GiB each, Kaggle). The memory stack that
-> makes a ~4B model fit there: `device_map="auto"` sharding + bf16 +
-> gradient checkpointing (`use_cache=False`, see the no-cache fix above) +
-> LoRA (~32.5M trainable of ~4.24B total, ~0.77%) + `PYTORCH_CUDA_ALLOC_CONF`
-> expandable segments. Reference (non-fused) kernels are used throughout
-> because `flash-linear-attention` / `causal_conv1d` wheels are typically
-> unavailable there — expect slow steps; that is normal, not a bug.
->
-> ---
->
-> *Upstream documentation follows.*
->
-> ## Getting Started
-Clone repo:
-```
-git clone git@github.com:facebookresearch/coconut.git
-cd coconut
-```
+## Why this matters
 
-Setup environment:
-```
-conda create --name coconut python=3.12
-conda activate coconut
-pip install -r requirements.txt
-```
+Coconut's core claim is that a model's hidden state can act as a "continuous
+thought" — instead of decoding a reasoning step to discrete tokens and
+re-embedding it, you feed the raw hidden state back in as the next input
+embedding, for `k` latent steps, before letting the model emit tokens again.
+Every prior Coconut result (the original paper and follow-ups) runs this on
+plain transformer stacks, where every layer's mechanism for carrying
+information across positions is the same: attention.
 
-The code relies on [wandb](https://wandb.ai/site/) for logging. Please log in your wandb account following this [document](https://docs.wandb.ai/ref/cli/wandb-login/) before running any experiments.
+Qwen3.5's DeltaNet layers already maintain their own compressed recurrent
+state across the sequence, by design, independent of what Coconut is doing.
+Feeding a Coconut-style continuous thought into a model where 3 out of 4
+layers have their own internal notion of "carried state" is untested territory.
+It's not obvious whether the two mechanisms compose cleanly, interfere, or one
+makes the other redundant. That's the open question this repo investigates.
+
+**Relevance and scope, stated plainly:** GSM8K (grade-school arithmetic word
+problems) is the standard Coconut benchmark, chosen here for direct
+comparability to the original paper, not because arithmetic reasoning is the
+end goal. This repo answers an architecture-level mechanistic question — does
+recurrent latent-token feedback work on hybrid linear-attention models — not
+a domain-level one. Findings here should be read as evidence about the
+mechanism, not as a claim about any specific downstream application.
+
+## Status
+
+Actively running experiments. Current findings are preliminary — see
+[Results](#results-so-far) below, which will be updated as runs complete.
+
+## Architecture-specific fixes
+
+Porting Coconut to Qwen3.5 broke several assumptions baked into the original
+code, because that code assumes a standard KV-cache attention stack. Every
+fix below is marked `Qwen3.5 patch` in source, in `coconut.py` unless noted.
+
+- **Cache is not sliceable KV.** Original Coconut truncates
+  `past_key_values` per latent pass (`k[:, :, :n, :]`) to only feed the model
+  what it needs. Qwen3.5's cache holds per-layer `LinearAttentionLayer`
+  objects with `recurrent_states` / `conv_states` — a compressed running
+  state, not a token-indexed KV tensor — so it cannot be sliced this way.
+  Fixed by passing the cache through whole instead of truncating it.
+  (`apply_qwen35_patch.py` keeps the original one-shot patch script for
+  reference; the fix is applied directly in `coconut.py`.)
+
+- **In-place cache updates break autograd.** Transformers'
+  `LinearAttentionLayer` updates its state buffers with `.copy_()` — an
+  in-place CUDA-graph-friendly optimization for inference. This silently
+  overwrites tensors that autograd had saved for the backward pass, so any
+  run using `use_cache=True` together with `.backward()` fails or produces
+  wrong gradients. Fixed by monkey-patching the update methods to reassign
+  out-of-place, and cloning DeltaNet states between Coconut's re-entrant
+  forward passes (`_patch_linear_attention_cache_for_training`,
+  `_clone_cache_states`).
+
+- **No KV cache under gradient checkpointing.** Checkpointing forces
+  `use_cache=False`, so `past_key_values` comes back `None` on every pass —
+  the original multi-pass latent loop raised `IndexError` on the very first
+  latent-token training epoch. Fixed with full-prefix recompute per latent
+  pass (offset 0, only the new slice's logits are used) whenever no cache is
+  present.
+
+- **`fused_recurrent` kernels have no backward pass.** Installing
+  `flash-linear-attention` for speed causes HF's kernel dispatch to select
+  `fused_recurrent_gated_delta_rule` for single-new-token forward calls
+  (which is what every latent pass looks like from the cache's point of
+  view, regardless of whether the prefix was recomputed). That kernel has no
+  backward implementation upstream (`NotImplementedError`, by design — see
+  `fla/ops/gated_delta_rule/fused_recurrent.py`). **Tested and confirmed:**
+  installing `fla` still fails here even after the full-prefix-recompute fix
+  above, because kernel dispatch is keyed on new-token count per call, not on
+  whether the prefix was recomputed. Reference (non-fused) PyTorch kernels
+  are used throughout as a result — training is correspondingly slower, but
+  correct.
+
+- **Single-process multi-GPU.** `device_map="auto"` model-parallel sharding
+  is used instead of DDP; dataset/distributed guards, device placement, and
+  checkpoint save/load are adapted accordingly (`dataset.py`,
+  `run_single_gpu.py`, `lora_utils.py`).
+
+- **Checkpoint auto-resume does not validate LoRA shape.** `run_single_gpu.py`
+  silently resumes from any checkpoint found at `save_path`, regardless of
+  whether its LoRA rank matches the current run's config. Loading a rank-16
+  checkpoint into a rank-64 model produces a wall of
+  `size mismatch for ... lora_A/lora_B` errors instead of a clear message.
+  **Known issue, fix planned:** validate saved rank against current config
+  before `load_state_dict` and fail with an explicit message
+  ("checkpoint was rank 16, current config is rank 64, refusing auto-resume")
+  instead of attempting the load blind. Until fixed, always point `save_path`
+  at a fresh directory when changing any LoRA hyperparameter.
+
+## Usage
+
+### Scripts
+
+- **`run_single_gpu.py`** — training entry point. Single process,
+  `device_map="auto"` sharding, LoRA by default.
+  `python run_single_gpu.py args/gsm_coconut.yaml --lr 5e-5 --debug true`
+- **`smoke_test_coconut.py`** — fast pre-flight check (forward + backward +
+  gradient sanity on a hand-built example). Run before any real training run.
+- **`lora_utils.py`** — LoRA wrap (`apply_lora`), trainable-only checkpointing
+  (`get_trainable_state_dict`), and the sparse new-token patch
+  (`apply_sparse_new_token_patch`): the embedding/LM-head matrices stay
+  frozen and only the 3 special latent tokens get tiny trainable tables
+  (~15K params instead of ~1.3B).
+- **`apply_qwen35_patch.py`** — original one-shot version of the cache patch;
+  kept for reference, already applied directly in `coconut.py`.
+
+### Config keys (beyond the standard Coconut set)
+
+| Key | Default | Purpose |
+|---|---|---|
+| `use_lora` | `true` | LoRA adapters instead of full finetune |
+| `lora_r` / `lora_alpha` / `lora_dropout` | `16 / 32 / 0.05` | LoRA hyperparameters |
+| `force_8bit_optimizer` | `false` | `PagedAdamW8bit` over LoRA params if needed |
+| `clip_grad_norm` | `1.0` | gradient clipping max norm; `0` disables |
+| `save_every_n_steps` | `250` | periodic mid-epoch checkpoints; `0` disables |
+| `eval_max_examples` | unset (full set) | caps the expensive `generate()`-based accuracy eval only |
+| `eval_every_n_epochs` | `1` | run generation eval only every N epochs |
+| `wandb_mode` | — | e.g. `disabled`, forwarded before `wandb.init` |
+| `disable_cudnn_conv` | `true` | works around cuDNN engine-search failure on T4 (sm_75) |
+
+NaN/Inf loss or gradients stop the run immediately with a clearly-labeled
+emergency checkpoint (`nan_checkpoint_*` / `nangrad_checkpoint_*`) instead of
+silently continuing to train on garbage.
+
+### Hardware
+
+Developed on 2× T4 (14.56 GiB each, Kaggle). Fitting a ~4B model there:
+`device_map="auto"` sharding + bf16 + gradient checkpointing + LoRA
+(~0.77–3% trainable) + `PYTORCH_CUDA_ALLOC_CONF` expandable segments.
+Reference (non-fused) kernels are used throughout — `flash-linear-attention`
+does not currently work here (see fixes above) and `causal_conv1d` is
+unavailable on this hardware. Expect slow steps; this is expected, not a bug.
+
+## Experiment design
+
+- **Base model:** `huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated`
+- **Task:** GSM8K, 500-example training subset, held-out validation set
+- **Comparison axes:**
+  - LoRA rank (16 vs 64, capacity)
+  - Curriculum stage / latent depth (`c_thought` × stage, 2 → 4 → 6 tokens)
+  - Coconut vs CoT-only baseline, same data budget
+- **Metrics:** held-out eval loss (per epoch), generation accuracy on a
+  fixed eval subset, CoT-match rate (whether the model still surfaces any
+  reasoning text at full latent depth — expected to be ~0 by design at
+  `max_latent_stage`)
+
+## Results so far
+
+*Preliminary — grid still running. Numbers below are eval loss / generation
+accuracy at the point of measurement, not final conclusions.*
+
+| Run | Rank | Epoch | Eval loss | Accuracy (n=50) |
+|---|---|---|---|---|
+| r16 | 16 | 7 | 0.523 | — |
+| r16 | 16 | 8 | 0.569 | — |
+| r16 | 16 | 10 (final, stage 3, k=6) | 0.830 | 8/50 (0.16) |
+| r64 | 64 | 3 | 0.36 | — |
+
+Train loss at r16 epoch 10 was 0.0006 — near-zero, alongside rising eval
+loss, which is a memorization/overfitting signature rather than a
+curriculum-transition artifact. This is the leading open question: does
+increasing LoRA rank change this pattern, or does more capacity just
+memorize faster on a 500-example set? The CoT-only baseline and full
+per-epoch grid (not just epochs 3/6/9/10) are required before drawing
+conclusions here — see [Open questions](#open-questions).
+
+## Open questions
+
+- Does the r16 → r64 accuracy improvement at matched epoch count reflect
+  real capacity gain, or is it an artifact of fewer epochs having had less
+  time to overfit on 500 examples? Needs per-epoch eval across the full run,
+  not 3-epoch snapshots.
+- Does a same-budget CoT-only baseline outperform Coconut on this
+  architecture at any latent depth, or does hybrid recurrence make Coconut's
+  approach redundant/harmful regardless of rank?
+- Is the accuracy drop at deeper latent stages (k=4, k=6) a curriculum
+  effect (needs more steps to adapt) or a genuine architecture-level ceiling
+  from DeltaNet layers' existing state mechanism conflicting with externally
+  imposed latent thought?
+- Does this generalize beyond GSM8K/arithmetic, or beyond Qwen3.5's specific
+  24:8 layer ratio, to hybrid architectures generally?
 
 ## Data
 
-The data for training and evaluation should be presented as a json file like below:
+Training/eval data follows the original Coconut format — a JSON list of
+`{"question": ..., "answer": ..., "steps": [...]}` objects. See
+`preprocessing/gsm_icot.bash` to regenerate the GSM8K split used here.
 
-```python
-[
-  {
-    "question": "...",
-    "answer": "...",
-    "steps": ["...", "...", ...]
-  },
-  ...
-]
-```
+## Acknowledgments and license
 
-The file should contain a list of data points. Each data point is composed of a question (str), an answer (str), and a list of steps (str), where each of them is a string.
+The core Coconut method, training loop structure, and original codebase are
+from Meta's paper below. This repo's contribution is the Qwen3.5 hybrid-
+architecture port, the fixes documented above, and the experiments and
+findings reported here. Released under the MIT license (see `LICENSE`),
+consistent with the upstream project.
 
-For example, you can download and process the [GSM8K](https://arxiv.org/abs/2110.14168) dataset (with [augmented training and validation sets](https://github.com/da03/Internalize_CoT_Step_by_Step/tree/e06a32ee5e4cd117171daeb4755d2a97ece62761/data/gsm8k)) by running:
-
-```bash
-bash preprocessing/gsm_icot.bash
-```
-
-## Arguments
-
-The configuration of a run should be specified in a yaml file (an example can be found [here](args/gsm_coconut.yaml)).
-
-- **General settings**
-
-  - **project**: Project name for wandb
-  - **save_path**: Your path to store the checkpoints
-  - **only_eval**: If true, only load a model and test on the data from `val_path` (must used along with `load_model_path`). Otherwise, train the model on `train_path` and test on `val_path` after every epoch.
-
-- **Method**
-  - **coconut**: Train coconut model
-  - **cot**: Train cot model
-  - **no_thoughts**: Train coconut (w/o thought) model
-  - **no_cot**: Train no-cot model
-
-- **Training settings**
-
-  - **c_thought**: Number of continuous thoughts for each reasoning step
-  - **epochs_per_stage**: Number of epochs for every training stage
-  - **max_latent_stage**: The maximum number of training stages (in addition to the initial stage)
-  - **pad_latent_to_max**: If the number of reasoning steps is fewer than the index of current training stage, pad the number of continuous thoughts.
-  - **save_only_improve**: Save the model only when there the best validation accuracy is updated. Recommended to set `False` for Coconut model training, because otherwise the checkpoints in the last stage might now get saved.
-  - **uniform_prob**: The probability to mix data from other stages. 0 for standard experiment, 0.3 for analysis experiment.
-  - **model_id**: Huggingface model id to load as the initialization, e.g., `openai-community/gpt2`
-  - **load_model_path**: The path to a checkpoint to load. Used in two cases: (1) for evaluation (2) to initialize coconut from a CoT-tuned model.
-  - **seed**: Random seed.
-  - **resume**: The epoch to resume. Can be used when we want to skip the initial training stages.
-  - **bf16**: Whether to use bf16 training.
-  - **train_path**: Path to the training set.
-  - **val_path**: Path to the validation or test set (depending on `only_eval`)
-  - **reset_optimizer**: Whether to reset the optimizer when swtiching training stages.
-  - **batch_size_training**: Batch size to train the model per GPU.
-  - **debug**: If true, there is no wandb and model saving. A subset of data will be used.
-  - **gradient_accumulation_steps**: Gradient accumulation steps
-  - **num_epochs**: Maximum training epoches.
-  - **lr**: Learning rate
-  - **weight_decay**: Weight decay
-
-
-## Training
-
-Run the following commands (replacing `N_GPUS` and `PATH_TO_ARGS`):
-
-```
-torchrun --nnodes 1 --nproc_per_node N_GPUS run.py PATH_TO_ARGS
-```
-
-## Reproducing Experiments
-
-Here we provide instructions to reproduce our experiments in the paper.
-
-All the commands below assume 4 * A100 (80GB) GPUs. You may change the corresponding arguments in the config file (`batch_size_training`, `gradient_accumulation_steps`) and `nproc_per_node` when launching the run, to adapt your resources.
-
-
-### GSM8K
-
-Preprocessing data:
-
-```bash
-bash preprocessing/gsm_icot.bash
-```
-
-First train the model with CoT (as the stage 0 training)
-
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/gsm_cot.yaml
-```
-
-Select a checkpoint as the initialization of Coconut (the validation accuracy is expected to be around 40%). Replace the `load_model_path` in the [args/gsm_coconut.yaml](args/gsm_coconut.yaml) with your selected checkpoint, and run:
-
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/gsm_coconut.yaml
-```
-
-Find the checkpoint with best validation accuracy, and put the path as `load_model_path` in [args/gsm_coconut_eval.yaml](args/gsm_coconut_eval.yaml). To evaluate:
-
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/gsm_coconut_eval.yaml
-```
-
-### ProntoQA
-
-Please clone the official [github repo](https://github.com/asaparov/prontoqa/tree/f0145b867b3c106285ec9ea1941a3f6eb7c6162d) of [ProntoQA](https://arxiv.org/pdf/2210.01240) and generate a raw dataset with:
-
-```bash
-cd prontoqa
-python run_experiment.py --model-name json --model-size dummy --ordering random --num-trials 10000 --few-shot-examples 0 --ontology fictional --min-hops 5 --max-hops 5 --hops-skip 1
-```
-
-Then copy the generated `5hop_0shot_random.json` file to `data` directory, and preprocess the dataset with:
-
-```bash
-python preprocessing/prontoqa.py
-```
-
-
-Then run the following to train the model:
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prontoqa_coconut.yaml
-```
-
-Find the checkpoint with best validation accuracy, and put the path as `load_model_path` in [args/prosqa_coconut_eval.yaml](args/prosqa_coconut_eval.yaml). To evaluate:
-
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prosqa_coconut_eval.yaml
-```
-
-
-### ProsQA
-
-The ProsQA dataset is at [data/prosqa_*.json](data).
-
-Then run the following to train the model:
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prosqa_coconut.yaml
-```
-
-Find the checkpoint with best validation accuracy, and put the path as `load_model_path` in [args/prosqa_coconut_eval.yaml](args/prosqa_coconut_eval.yaml). To evaluate:
-
-```bash
-torchrun --nnodes 1 --nproc_per_node 4 run.py args/prosqa_coconut_eval.yaml
-```
-
-
-
-
-## Citation
-If you use this code base in your research, please cite our paper with the following BibTex entry:
 ```bibtex
 @article{hao2024training,
   title={Training Large Language Models to Reason in a Continuous Latent Space},
@@ -279,6 +219,3 @@ If you use this code base in your research, please cite our paper with the follo
   year={2024}
 }
 ```
-
-## License
-This code is released under the MIT license (see [LICENSE](LICENSE)).
