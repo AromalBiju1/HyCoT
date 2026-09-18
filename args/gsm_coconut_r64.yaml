@@ -1,8 +1,11 @@
 # R64 Coconut run (Qwen3.5 + LoRA r64) — canonical fresh-run config.
-# Fresh 10-epoch run: launch into an EMPTY /kaggle/working/checkpoints_r64
-# (auto-resume picks up any checkpoint_* in save_path/name, so never share
-# a save dir between runs — r16 -> checkpoints_r16, r64 -> checkpoints_r64,
-# CoT baseline -> checkpoints_cot).
+# Same file as args/gsm_coconut.yaml (kept in sync); this alias exists so the
+# grid reads as r16 / r64 / cot with one obvious file per run.
+# Launch FRESH into an EMPTY /kaggle/working/checkpoints_r64:
+#   rm -rf /kaggle/working/checkpoints_r64 && mkdir -p /kaggle/working/checkpoints_r64
+#   python run_single_gpu.py args/gsm_coconut_r64.yaml
+# (auto-resume picks up any checkpoint_* already in save_path/name, so a
+# non-empty dir would silently resume the old partial run instead of starting fresh.)
 # 500-example subset: build once on Kaggle from the full converted set:
 #   python -c "import json,random; random.seed(0); d=json.load(open('data/gsm_train.json')); random.shuffle(d); json.dump(d[:500], open('data/gsm_train_500.json','w'))"
 # Eval set is the full data/gsm_valid.json with generate-eval capped at 200.

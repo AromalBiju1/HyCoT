@@ -1,0 +1,51 @@
+# CoT-only baseline (Qwen3.5 + LoRA r64) — the fair comparison for the r64 Coconut run.
+# cot:true / coconut:false, everything else matched to the r64 coconut config:
+# same model, same 500-example train subset, same full valid set, same 10 epochs,
+# same seed/lr/batch/grad-accum, same LoRA rank, same eval settings.
+# (Upstream args/gsm_cot.yaml is the GPT-2 reference — untouched. This file is the
+# Qwen3.5 LoRA baseline for the current grid.)
+# Unique save dir (checkpoints_cot) so auto-resume can never cross-load a
+# coconut run's checkpoint_* files. Launch when a session slot frees up:
+#   mkdir -p /kaggle/working/checkpoints_cot
+#   python run_single_gpu.py args/gsm_cot_baseline.yaml
+
+project: coconut
+save_path: /kaggle/working/checkpoints_cot
+name: gsm-cot-baseline
+
+only_eval: False
+
+coconut: False
+cot: True
+no_thoughts: False
+no_cot: False
+
+c_thought: 0
+epochs_per_stage: 1
+max_latent_stage: 0
+pad_latent_to_max: True
+
+save_only_improve: False
+uniform_prob: 0.0
+model_id: huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated
+load_model_path: "None"
+seed: 0
+resume: 0
+bf16: true
+train_path: data/gsm_train_500.json
+val_path: data/gsm_valid.json
+reset_optimizer: False
+batch_size_training: 1
+debug: false
+gradient_accumulation_steps: 1
+num_epochs: 10
+lr: !!float "1e-4"
+wandb_mode: disabled
+weight_decay: 0.01
+use_lora: true
+lora_r: 64
+lora_alpha: 128
+clip_grad_norm: 1.0
+save_every_n_steps: 250
+eval_every_n_epochs: 1
+eval_max_examples: 200

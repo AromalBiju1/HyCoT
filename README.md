@@ -108,6 +108,15 @@ fix below is marked `Qwen3.5 patch` in source, in `coconut.py` unless noted.
 
 ### Scripts
 
+- **`run.py` vs `run_single_gpu.py`** — `run.py` is the original Coconut
+  entry point: full-parameter finetune under `torchrun` with NCCL/FSDP/DDP
+  across datacenter GPUs. `run_single_gpu.py` is this repo's rewrite for
+  Kaggle (2× T4): single process, `device_map="auto"` model-parallel
+  sharding instead of DDP, LoRA adapters instead of full finetune, plus the
+  Qwen3.5 fixes above. Use `run_single_gpu.py` for all runs here; `run.py`
+  is kept for reference only and will OOM on this hardware. Note the two
+  scripts also differ in auto-resume behavior — see the checkpoint
+  auto-resume caveat above before pointing either at an old save dir.
 - **`run_single_gpu.py`** — training entry point. Single process,
   `device_map="auto"` sharding, LoRA by default.
   `python run_single_gpu.py args/gsm_coconut.yaml --lr 5e-5 --debug true`
