@@ -1,0 +1,12 @@
+# LoRA adapter checkpoints (100MB–500MB each) — never commit these.
+checkpoint_*
+periodic_checkpoint_*
+nan_checkpoint_*
+nangrad_checkpoint_*
+r_64/
+checkpoints*/
+# Runtime junk
+__pycache__/
+*.pyc
+.wandb/
+wandb/
