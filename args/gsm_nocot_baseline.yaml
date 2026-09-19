@@ -1,23 +1,36 @@
-# No-CoT baseline (Qwen3.5 + LoRA r64) — direct-answer control for the grid.
+# No-CoT baseline (Qwen3.5 + LoRA r16) — direct-answer control for the grid.
 # coconut:false / cot:false / no_cot:true: no latent tokens, no chain-of-thought,
 # just question -> ### answer. This is the run that decides whether stages 2-3
 # latents carry signal or just match the no-reasoning floor.
-# Everything else matched to the as-run r64 config: same model, same 500-example
-# train subset, same full valid set, same 10 epochs, same seed/lr/batch/
-# grad-accum, same LoRA rank, same eval (50 examples every 3 epochs).
-# (Upstream has no no_cot example yaml; this file is the Qwen3.5 LoRA no-CoT
-# baseline for the current grid.)
+# LoRA is r16/alpha32 to match the clean r16 Coconut run — ALL Coconut numbers
+# come from r16, and r64 overfit faster in this setup, so an r64 baseline would
+# be compared against a different learner and decide nothing.
+# Everything else matched to the r16 run: same model, same 500-example train
+# subset, same full valid set, same 10 epochs, same seed/lr/batch/grad-accum,
+# same eval (50 examples every 3 epochs). Optimizer resets every epoch boundary
+# (reset_optimizer: True, same as the Coconut runs); epochs_per_stage is set to
+# 3 for parity but is never read on the no_cot path (scheduled_stage is forced
+# to 0 in run_single_gpu.py), and max_latent_stage stays 0.
+# (The CoT baseline yaml still carries r64 — aligning it to r16 is a separate
+# later step.)
 # Unique save dir (checkpoints_nocot) so auto-resume can never cross-load
-# another run's checkpoint_* files. Launch FRESH into an EMPTY dir:
-#   rm -rf /kaggle/working/checkpoints_nocot && mkdir -p /kaggle/working/checkpoints_nocot
-#   python run_single_gpu.py args/gsm_nocot_baseline.yaml
+# another run's checkpoint_* files. Launch FRESH into an EMPTY dir, with logging:
+#   !mkdir -p /kaggle/working/logs
+#   !python run_single_gpu.py args/gsm_nocot_baseline.yaml 2>&1 | tee -a /kaggle/working/logs/nocot.log
 # Before walking away: the printed Config: line must show coconut: False,
-# cot: False, no_cot: True, lora_r: 64, train_path: data/gsm_train_500.json,
-# seed: 0.
+# cot: False, no_cot: True, lora_r: 16, lora_alpha: 32,
+# train_path: data/gsm_train_500.json, seed: 0 — and trainable params near
+# 32.4M (r16), not ~130M.
+# Mode check at the epoch-3 samples: output must be the question followed
+# directly by ### answer, with no <<...>> steps. If steps appear, no_cot isn't
+# applied to the training targets — kill it and report the sample.
+# End of run: compare epochs 3/6/9 vs Coconut stages 0/1/2 at the same epochs;
+# epoch 10 gets no scheduled eval, so run a short only_eval on the epoch_10
+# checkpoint for the stage-3 comparison point.
 
 project: coconut
 save_path: /kaggle/working/checkpoints_nocot
-name: gsm-nocot-baseline
+name: gsm-nocot-baseline-r16
 
 only_eval: False
 
@@ -27,7 +40,7 @@ no_thoughts: False
 no_cot: True
 
 c_thought: 0
-epochs_per_stage: 1
+epochs_per_stage: 3
 max_latent_stage: 0
 pad_latent_to_max: True
 
@@ -40,7 +53,7 @@ resume: 0
 bf16: true
 train_path: data/gsm_train_500.json
 val_path: data/gsm_valid.json
-reset_optimizer: False
+reset_optimizer: True
 batch_size_training: 1
 debug: false
 gradient_accumulation_steps: 1
@@ -49,8 +62,8 @@ lr: !!float "1e-4"
 wandb_mode: disabled
 weight_decay: 0.01
 use_lora: true
-lora_r: 64
-lora_alpha: 128
+lora_r: 16
+lora_alpha: 32
 clip_grad_norm: 1.0
 save_every_n_steps: 250
 eval_every_n_epochs: 3
