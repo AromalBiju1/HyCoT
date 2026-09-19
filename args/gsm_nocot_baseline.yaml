@@ -1,0 +1,57 @@
+# No-CoT baseline (Qwen3.5 + LoRA r64) — direct-answer control for the grid.
+# coconut:false / cot:false / no_cot:true: no latent tokens, no chain-of-thought,
+# just question -> ### answer. This is the run that decides whether stages 2-3
+# latents carry signal or just match the no-reasoning floor.
+# Everything else matched to the as-run r64 config: same model, same 500-example
+# train subset, same full valid set, same 10 epochs, same seed/lr/batch/
+# grad-accum, same LoRA rank, same eval (50 examples every 3 epochs).
+# (Upstream has no no_cot example yaml; this file is the Qwen3.5 LoRA no-CoT
+# baseline for the current grid.)
+# Unique save dir (checkpoints_nocot) so auto-resume can never cross-load
+# another run's checkpoint_* files. Launch FRESH into an EMPTY dir:
+#   rm -rf /kaggle/working/checkpoints_nocot && mkdir -p /kaggle/working/checkpoints_nocot
+#   python run_single_gpu.py args/gsm_nocot_baseline.yaml
+# Before walking away: the printed Config: line must show coconut: False,
+# cot: False, no_cot: True, lora_r: 64, train_path: data/gsm_train_500.json,
+# seed: 0.
+
+project: coconut
+save_path: /kaggle/working/checkpoints_nocot
+name: gsm-nocot-baseline
+
+only_eval: False
+
+coconut: False
+cot: False
+no_thoughts: False
+no_cot: True
+
+c_thought: 0
+epochs_per_stage: 1
+max_latent_stage: 0
+pad_latent_to_max: True
+
+save_only_improve: False
+uniform_prob: 0.0
+model_id: huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated
+load_model_path: "None"
+seed: 0
+resume: 0
+bf16: true
+train_path: data/gsm_train_500.json
+val_path: data/gsm_valid.json
+reset_optimizer: False
+batch_size_training: 1
+debug: false
+gradient_accumulation_steps: 1
+num_epochs: 10
+lr: !!float "1e-4"
+wandb_mode: disabled
+weight_decay: 0.01
+use_lora: true
+lora_r: 64
+lora_alpha: 128
+clip_grad_norm: 1.0
+save_every_n_steps: 250
+eval_every_n_epochs: 3
+eval_max_examples: 50
