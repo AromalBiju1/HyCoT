@@ -3,9 +3,11 @@
 # (auto-resume picks up any checkpoint_* in save_path/name, so never share
 # a save dir between runs — r16 -> checkpoints_r16, r64 -> checkpoints_r64,
 # CoT baseline -> checkpoints_cot).
+# Eval is 50 examples every 3 epochs: that is what r64 actually ran
+# (logs/r64_run_log.txt), and the grid matches it like-for-like.
 # 500-example subset: build once on Kaggle from the full converted set:
 #   python -c "import json,random; random.seed(0); d=json.load(open('data/gsm_train.json')); random.shuffle(d); json.dump(d[:500], open('data/gsm_train_500.json','w'))"
-# Eval set is the full data/gsm_valid.json with generate-eval capped at 200.
+# Eval set is the full data/gsm_valid.json with generate-eval capped at 50.
 
 project: coconut
 save_path: /kaggle/working/checkpoints_r64
@@ -45,5 +47,5 @@ lora_r: 64
 lora_alpha: 128
 clip_grad_norm: 1.0
 save_every_n_steps: 250
-eval_every_n_epochs: 1
-eval_max_examples: 200
+eval_every_n_epochs: 3
+eval_max_examples: 50

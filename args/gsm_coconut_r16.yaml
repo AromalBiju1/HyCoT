@@ -1,7 +1,14 @@
-# R16 Coconut run (Qwen3.5 + LoRA r16) — matches the r64 config except rank.
-# Same 500-example train subset, same full valid set, same 10 epochs, same
-# eval settings. Unique save dir (checkpoints_r16) so epoch-based
-# auto-resume can never cross-load another run's checkpoint_* files.
+# R16 Coconut run (Qwen3.5 + LoRA r16) — mirrors the as-run r64 config in
+# EVERYTHING except LoRA rank (r16/alpha32 vs r64/alpha128), name, and save
+# dir. Eval stays at 50 examples every 3 epochs because r64 already ran that
+# way — changing it for r16 would break the like-for-like comparison.
+# (Eval loss still runs every epoch; only generate-accuracy is every 3rd.)
+# Unique save dir (checkpoints_r16) so epoch-based auto-resume can never
+# cross-load another run's checkpoint_* files. Launch FRESH into an EMPTY dir:
+#   rm -rf /kaggle/working/checkpoints_r16 && mkdir -p /kaggle/working/checkpoints_r16
+#   python run_single_gpu.py args/gsm_coconut_r16.yaml
+# Before walking away: the printed Config: line must show lora_r: 16,
+# lora_alpha: 32, train_path: data/gsm_train_500.json, seed: 0.
 # Build the subset once on Kaggle (seed 0, first 500 after shuffle):
 #   python -c "import json,random; random.seed(0); d=json.load(open('data/gsm_train.json')); random.shuffle(d); json.dump(d[:500], open('data/gsm_train_500.json','w'))"
 
@@ -43,5 +50,5 @@ lora_r: 16
 lora_alpha: 32
 clip_grad_norm: 1.0
 save_every_n_steps: 250
-eval_every_n_epochs: 1
-eval_max_examples: 200
+eval_every_n_epochs: 3
+eval_max_examples: 50
