@@ -1,6 +1,12 @@
 # R64 Coconut run (Qwen3.5 + LoRA r64) — canonical fresh-run config.
 # Same file as args/gsm_coconut.yaml (kept in sync); this alias exists so the
 # grid reads as r16 / r64 / cot with one obvious file per run.
+# Eval is 50 examples every 3 epochs because that is what r64 actually ran
+# (see logs/r64_run_log.txt) — r16 and the CoT baseline match it for a
+# like-for-like comparison. (Eval loss still runs every epoch; only
+# generate-accuracy is every 3rd: epochs 3, 6, 9. Epoch 10/stage 3 gets no
+# generate-eval unless the code forces a final eval — accepted for this grid;
+# changing it would need all runs redone together.)
 # Launch FRESH into an EMPTY /kaggle/working/checkpoints_r64:
 #   rm -rf /kaggle/working/checkpoints_r64 && mkdir -p /kaggle/working/checkpoints_r64
 #   python run_single_gpu.py args/gsm_coconut_r64.yaml
@@ -8,7 +14,7 @@
 # non-empty dir would silently resume the old partial run instead of starting fresh.)
 # 500-example subset: build once on Kaggle from the full converted set:
 #   python -c "import json,random; random.seed(0); d=json.load(open('data/gsm_train.json')); random.shuffle(d); json.dump(d[:500], open('data/gsm_train_500.json','w'))"
-# Eval set is the full data/gsm_valid.json with generate-eval capped at 200.
+# Eval set is the full data/gsm_valid.json with generate-eval capped at 50.
 
 project: coconut
 save_path: /kaggle/working/checkpoints_r64
@@ -48,5 +54,5 @@ lora_r: 64
 lora_alpha: 128
 clip_grad_norm: 1.0
 save_every_n_steps: 250
-eval_every_n_epochs: 1
-eval_max_examples: 200
+eval_every_n_epochs: 3
+eval_max_examples: 50

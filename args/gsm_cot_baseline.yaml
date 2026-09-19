@@ -1,7 +1,8 @@
 # CoT-only baseline (Qwen3.5 + LoRA r64) — the fair comparison for the r64 Coconut run.
-# cot:true / coconut:false, everything else matched to the r64 coconut config:
+# cot:true / coconut:false, everything else matched to the as-run r64 config:
 # same model, same 500-example train subset, same full valid set, same 10 epochs,
-# same seed/lr/batch/grad-accum, same LoRA rank, same eval settings.
+# same seed/lr/batch/grad-accum, same LoRA rank, same eval (50 examples every
+# 3 epochs — r64 already ran that way, so the baseline matches it).
 # (Upstream args/gsm_cot.yaml is the GPT-2 reference — untouched. This file is the
 # Qwen3.5 LoRA baseline for the current grid.)
 # Unique save dir (checkpoints_cot) so auto-resume can never cross-load a
@@ -47,5 +48,5 @@ lora_r: 64
 lora_alpha: 128
 clip_grad_norm: 1.0
 save_every_n_steps: 250
-eval_every_n_epochs: 1
-eval_max_examples: 200
+eval_every_n_epochs: 3
+eval_max_examples: 50
