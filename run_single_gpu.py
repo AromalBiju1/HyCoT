@@ -304,6 +304,14 @@ def main():
         ):
             pass  # resuming a preempted coconut run, handled below
 
+        elif not configs.coconut:
+            # Non-Coconut path: defer loading until AFTER LoRA wrapping below.
+            # If we load now into the raw AutoModelForCausalLM, then wrap
+            # with get_peft_model, the adapter keys (lora_A/lora_B) in the
+            # checkpoint get rejected as unexpected_keys and the adapters
+            # end up zero-initialized — silent failure.
+            pass
+
         else:
             loaded = True
             print(model.load_state_dict(saved_weights, strict=False))
@@ -357,7 +365,18 @@ def main():
         model = Coconut(model, latent_id, start_id, end_id, tokenizer.eos_token_id)
 
     if configs.load_model_path != "None" and not loaded:
-        print(model.load_state_dict(saved_weights, strict=False))
+        result = model.load_state_dict(saved_weights, strict=False)
+        print(f"load_state_dict: unexpected_keys={len(result.unexpected_keys)}, missing_keys={len(result.missing_keys)}")
+        if result.unexpected_keys:
+            print(f"  unexpected_keys sample: {result.unexpected_keys[:5]}")
+        # Verify LoRA B weights loaded correctly (must be non-zero after training)
+        lora_b_sum = 0
+        lora_b_count = 0
+        for name, param in model.named_parameters():
+            if "lora_B" in name or "lora_b" in name:
+                lora_b_sum += param.data.abs().sum().item()
+                lora_b_count += 1
+        print(f"  lora_B params: {lora_b_count}, abs_sum={lora_b_sum:.6f} (must be >0 for trained adapter)")
 
     # input_device and gradient checkpointing were both set up earlier, right
     # after the raw AutoModelForCausalLM load, before Coconut wrapping -- see
