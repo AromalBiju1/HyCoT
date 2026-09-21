@@ -1,0 +1,35 @@
+# HyCoT — Qwen3.5-4B latent ablation eval (n=200)
+# Same 200 problems for every run, greedy generation, 95% Wilson CI ≈ ±7 points
+# Stage = epoch // 3 (e1-3 stage 0, e4-6 stage 1 with 2 latents, e7-9 stage 2, e10 stage 3)
+# See docs/RESULTS_latent_ablation.md for full analysis.
+# This file and coconut_eval_n200.csv summarize the same data; eval_logs.zip holds the raw logs.
+# Two crashed logs removed from zip: nocot_r16_abl-none_e3_n200.log / nothought_r16_abl-none_e3_n200.log (underscore names, tracebacks)
+# Smoke test log kept in zip: coconutr16_abl-zero_e4_n5.log (n=5, 2/5 = 0.4) — not part of n=200 table, included only for completeness.
+
+Run, Epoch (stage), Correct, Acc, Latent ablation
+No-CoT, 3 (0), 44, 0.22, none
+No-thought, 3 (0), 107, 0.535, none
+Coconut, 3 (0), 114, 0.570, none
+No-thought, 4 (1), 80, 0.400, none
+Coconut, 4 (1) normal, 91, 0.455, none
+Coconut, 4 (1) shuffled, 91, 0.455, shuffle
+Coconut, 4 (1) embed, 104, 0.520, embed
+No-thought, 6 (1), 97, 0.485, none
+Coconut, 6 (1) normal, 99, 0.495, none
+Coconut, 6 (1) embed, 98, 0.490, embed
+Coconut, 6 (1) shuffled, 89, 0.445, shuffle
+
+# Raw logs in eval_logs.zip (16 files):
+#  eval_logs/coconutr16_abl-none_e3_n200.log
+#  eval_logs/coconutr16_abl-none_e4_n200.log
+#  eval_logs/coconutr16_abl-none_e6_n200.log
+#  eval_logs/coconutr16_abl-embed_e4_n200.log
+#  eval_logs/coconutr16_abl-embed_e6_n200.log
+#  eval_logs/coconutr16_abl-shuffle_e4_n200.log
+#  eval_logs/coconutr16_abl-shuffle_e6_n200.log
+#  eval_logs/coconutr16_abl-zero_e4_n5.log  (smoke test, n=5)
+#  eval_logs/nocot-r16_abl-none_e3_n200.log
+#  eval_logs/nothought-r16_abl-none_e3_n200.log
+#  eval_logs/nothought-r16_abl-none_e4_n200.log
+#  eval_logs/nothought-r16_abl-none_e6_n200.log
+#  + sweep.out, run_rest.sh, eval_sweep.sh
