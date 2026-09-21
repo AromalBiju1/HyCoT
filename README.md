@@ -1,8 +1,8 @@
 # Latent Reasoning on Hybrid Linear-Attention Architectures
 
-**Does continuous latent thought (Coconut) transfer to hybrid gated-DeltaNet
-+ full-attention models, or does it break down when three quarters (24 of 32 layers) already
-carry their own recurrent state?**
+**Does continuous latent thought (Coconut) transfer to hybrid gated-DeltaNet/full-attention models, or does it break down when three quarters of the layers (24 of 32) already carry their own recurrent state?**
+
+**Result so far:** at 500-example LoRA scale, latent tokens gave no measurable benefit over a same-curriculum no-thought control, and ablating or shuffling the latents did not change accuracy beyond noise. This is a small-data result, not a verdict on the method or the architecture; see [Results](#results) and docs/RESULTS_latent_ablation.md.
 
 This project started as a port of Meta's [Coconut](https://arxiv.org/abs/2412.06769)
 ("Training Large Language Models to Reason in a Continuous Latent Space") onto
