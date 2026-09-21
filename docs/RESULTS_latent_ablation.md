@@ -11,7 +11,7 @@ model did not use the *content* of its latent thoughts. This is a result about a
 | Model | `huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated` (24 linear-attn / 8 full-attn layers) |
 | Training | LoRA r=16, alpha=32, lr 1e-4, bf16, batch 1, 10 epochs, seed 0 |
 | Data | `gsm_train_500.json` (500 GSM8K examples) |
-| Curriculum | c_thought=2, 3 epochs per stage; e1–3 stage 0 (0 latents), e4–6 stage 1 (2 latents), e7–9 stage 2 (4 latents), e10 stage 3 (6 latents) — `stage = epoch // 3` (0-indexed) / `stage = (epoch_1idx-1) // 3` |
+| Curriculum | c_thought=2, 3 epochs per stage; e1–3 stage 0 (0 latents), e4–6 stage 1 (2 latents), e7–9 stage 2 (4 latents), e10 stage 3 (6 latents) — `stage = (epoch - 1) // 3` for 1-indexed epochs |
 | Eval | greedy generation on the first 200 of 500 validation problems (same 200 for every run) |
 | Hardware | Kaggle T4 x2, reference DeltaNet kernels (no fla / causal-conv1d) |
 
@@ -55,7 +55,7 @@ state; `shuffle` feeds the thought computed for the previous question.
 - Every run memorizes its training set (train loss near 0 within a few epochs) and validation loss is lowest around epoch 1-3. Latent stages start at epoch 4, after memorization has begun.
 - Epochs 7-10 (stages 2 and 3) are heavily overfit and were not used for conclusions.
 - n=200 with one seed. No paired per-question analysis (only totals were logged).
-- An r64 run was worse than r16 (0.36 at stage 0 / 0.22 at stage 1 on n=50, from `coconut_runs_condensed_log.txt` / `coconut_metrics.csv`: r64 18/50 at epoch 3, 11/50 at epoch 6) and was stopped early.
+- An early r64 run scored lower than r16 at matched epochs, was stopped at epoch 6 and overfit. Not in the release; no conclusion about capacity is drawn.
 
 ## What would make this a real test
 
