@@ -76,4 +76,4 @@ bash eval_sweep.sh args/gsm_nocot_baseline.yaml <nocot_ckpt_dir> 200 3
 ```
 
 Modes: `none | zero | embed | noise | shuffle` (eval-only; the code refuses to run them in training).
-Data: `coconut_eval_n200.csv`. Raw logs: `eval_logs.zip` — not committed to git; attached to the GitHub Release for this branch (or Kaggle dataset if linked in the Release notes).
+Data: `coconut_eval_n200.csv` and `results.txt` (plain-text summary). Raw logs: `eval_logs.zip` — not committed to git; attached to the GitHub Release for this branch (or Kaggle dataset if linked in the Release notes). Zip cleaned: two crashed underscore logs (`nocot_r16_abl-none_e3_n200.log`, `nothought_r16_abl-none_e3_n200.log`) removed; smoke-test log `coconutr16_abl-zero_e4_n5.log` (n=5, 2/5) kept and mentioned here.

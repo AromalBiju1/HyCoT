@@ -9,7 +9,6 @@ checkpoints*/
 eval_logs.zip
 eval_logs/
 eval_logs*.zip
-results.txt
 results (1).txt
 coconutr16_abl-none_e4_n200.log
 nothought_r16_abl-none_e3_n200.log
