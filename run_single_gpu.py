@@ -363,6 +363,10 @@ def main():
 
     if configs.coconut:
         model = Coconut(model, latent_id, start_id, end_id, tokenizer.eos_token_id)
+        model.latent_ablation = getattr(configs, "latent_ablation", "none")
+        if model.latent_ablation != "none":
+            assert configs.only_eval, "latent_ablation is eval-only"
+            print(f"LATENT ABLATION MODE: {model.latent_ablation}")
 
     if configs.load_model_path != "None" and not loaded:
         result = model.load_state_dict(saved_weights, strict=False)

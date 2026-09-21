@@ -188,6 +188,16 @@ class Coconut(nn.Module):
         self.start_latent_id = start_latent_id
         self.end_latent_id = end_latent_id
 
+        # Eval-only latent ablation: none | zero | embed | noise | shuffle.
+        #   zero    - feed zeros instead of the continuous thought
+        #   embed   - feed the raw <|latent|> token embedding (no thought info)
+        #   noise   - feed Gaussian noise with the same norm as the real thought
+        #   shuffle - feed the thought computed for the PREVIOUS question
+        # Set from the yaml/CLI via `latent_ablation`. Never use during training.
+        self.latent_ablation = "none"
+        self._bank_cur = {}
+        self._bank_prev = {}
+
         # tested with GPT2 and Llama3. Duck-typed by class name instead of
         # isinstance(GPT2LMHeadModel) -- see the import comment above for why.
         if type(self.base_causallm).__name__ == "GPT2LMHeadModel":
@@ -340,9 +350,22 @@ class Coconut(nn.Module):
                 batch_idx, token_idx = idx_pair
 
                 # replace it with the preceding last hidden states
-                tensor_list[batch_idx][token_idx] = hidden_states[
+                thought = hidden_states[
                     batch_idx, token_idx - 1 - hidden_states_offset, :
                 ]
+                mode = self.latent_ablation
+                if mode != "none":
+                    self._bank_cur[pass_idx] = thought.detach()
+                if mode == "zero":
+                    thought = torch.zeros_like(thought)
+                elif mode == "embed":
+                    thought = tensor_list[batch_idx][token_idx]  # keep <|latent|> embedding
+                elif mode == "noise":
+                    n = torch.randn_like(thought)
+                    thought = n * (thought.norm() / n.norm().clamp_min(1e-8))
+                elif mode == "shuffle" and pass_idx in self._bank_prev:
+                    thought = self._bank_prev[pass_idx].to(thought.device, thought.dtype)
+                tensor_list[batch_idx][token_idx] = thought
 
             # assemble the new inputs_embeds
             inputs_embeds = torch.stack(
@@ -427,6 +450,8 @@ class Coconut(nn.Module):
             ).reshape(1, -1),
         )
         inputs_embeds = outputs.inputs_embeds
+        if self.latent_ablation != "none":
+            self._bank_prev, self._bank_cur = self._bank_cur, {}
 
         # get the first token using the current hidden state
         next_token = torch.argmax(outputs.logits[0, -1]).item()
