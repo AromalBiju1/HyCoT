@@ -170,25 +170,27 @@ unavailable on this hardware. Expect slow steps; this is expected, not a bug.
   reasoning text at full latent depth — expected to be ~0 by design at
   `max_latent_stage`)
 
-## Results so far
+## Results
 
-*Preliminary — grid still running. Numbers below are eval loss / generation
-accuracy at the point of measurement, not final conclusions.*
+Continuous thought did not outperform the no-thought control in this 500-example LoRA regime. See [docs/RESULTS_latent_ablation.md](docs/RESULTS_latent_ablation.md) for full analysis.
 
-| Run | Rank | Epoch | Eval loss | Accuracy (n=50) |
-|---|---|---|---|---|
-| r16 | 16 | 7 | 0.523 | — |
-| r16 | 16 | 8 | 0.569 | — |
-| r16 | 16 | 10 (final, stage 3, k=6) | 0.830 | 8/50 (0.16) |
-| r64 | 64 | 3 | 0.36 | — |
+n=200 greedy eval (same 200 problems for every run), 95% Wilson CI ≈ ±7 points. Stage = `epoch // 3` (e1–3 stage 0, e4–6 stage 1 with 2 latents, e7–9 stage 2, e10 stage 3) — matches the log's stage map and the table below.
 
-Train loss at r16 epoch 10 was 0.0006 — near-zero, alongside rising eval
-loss, which is a memorization/overfitting signature rather than a
-curriculum-transition artifact. This is the leading open question: does
-increasing LoRA rank change this pattern, or does more capacity just
-memorize faster on a 500-example set? The CoT-only baseline and full
-per-epoch grid (not just epochs 3/6/9/10) are required before drawing
-conclusions here — see [Open questions](#open-questions).
+| Run | Epoch (stage) | Correct | Acc |
+|---|---|---|---|
+| No-CoT | 3 (0) | 44 | 0.22 |
+| No-thought | 3 (0) | 107 | 0.535 |
+| Coconut | 3 (0) | 114 | 0.570 |
+| No-thought | 4 (1) | 80 | 0.400 |
+| Coconut, normal latents | 4 (1) | 91 | 0.455 |
+| Coconut, shuffled latents | 4 (1) | 91 | 0.455 |
+| Coconut, latent content removed (`embed`) | 4 (1) | 104 | 0.520 |
+| No-thought | 6 (1) | 97 | 0.485 |
+| Coconut, normal latents | 6 (1) | 99 | 0.495 |
+| Coconut, latent content removed (`embed`) | 6 (1) | 98 | 0.490 |
+| Coconut, shuffled latents | 6 (1) | 89 | 0.445 |
+
+Data: `coconut_eval_n200.csv`. Raw logs: `eval_logs.zip` (see Release). The claims above are only reproducible with the patched `coconut.py` + `run_single_gpu.py` + `eval_sweep.sh` in this branch.
 
 ## Open questions
 
