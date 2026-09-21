@@ -163,7 +163,7 @@ unavailable on this hardware. Expect slow steps; this is expected, not a bug.
 - **Comparison axes:**
   - No-CoT, no-thought control (same curriculum and CoT truncation, no latent tokens), and Coconut
   - Inference-time latent ablations (embed, shuffle) on the trained Coconut checkpoint
-  - LoRA rank 16 vs 64 (r64 stopped after epoch 6, n=50 eval)
+  - LoRA rank 16 vs 64 (r64 stopped after epoch 6; early small eval, not in the release)
   - Not run: separate full-CoT baseline, pause-token control
 - **Metrics:** generation accuracy on a fixed eval subset (first 200 of 500 validation problems, greedy, same 200 for every run; 95% Wilson CI) — held-out eval loss was logged per epoch and is used only for the overfitting caveat below; CoT-match not reported at n=200
 
@@ -199,8 +199,8 @@ Data: `coconut_eval_n200.csv`. Raw logs: `eval_logs.zip` (see Release). The clai
 
 - Do latents help at thousands of training examples? Untested.
 - Is the null result specific to the hybrid architecture? Needs a pure-attention control at the same budget.
-- Stages 2–3 (4 and 6 latents) scored lower (about 0.28 and 0.24 at n=50) but these epochs are heavily overfit. No matched no-thought comparison exists at those stages in the released n=200 logs, so curriculum effect vs latent depth is unresolved.
-- r64 scored lower than r16 at matched epochs (0.36 vs 0.60 at epoch 3, 0.22 vs 0.56 at epoch 6, n=50) but was stopped at epoch 6, so capacity is unresolved.
+- Stages 2-3 (4 and 6 latents) scored lower in early small checks that are not in the release. Those epochs are heavily overfit and there is no matched no-thought comparison at n=200, so curriculum effect vs latent depth is unresolved.
+- An early r64 run scored lower than r16 at matched epochs, was stopped at epoch 6 and overfit. Not in the release; no conclusion about capacity is drawn.
 
 ## Data
 

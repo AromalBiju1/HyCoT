@@ -55,7 +55,7 @@ state; `shuffle` feeds the thought computed for the previous question.
 - Every run memorizes its training set (train loss near 0 within a few epochs) and validation loss is lowest around epoch 1-3. Latent stages start at epoch 4, after memorization has begun.
 - Epochs 7-10 (stages 2 and 3) are heavily overfit and were not used for conclusions.
 - n=200 with one seed. No paired per-question analysis (only totals were logged).
-- An r64 run was worse than r16 (0.36 at stage 0 / 0.22 at stage 1 on n=50, from run notes: r64 18/50 at epoch 3, 11/50 at epoch 6; not in `coconut_runs_condensed_log.txt`/`coconut_metrics.csv` in repo or `v0.1-n200-latent-ablation` release) and was stopped early.
+- An early r64 run scored lower than r16 at matched epochs, was stopped at epoch 6 and overfit. Not in the release; no conclusion about capacity is drawn.
 
 ## What would make this a real test
 
