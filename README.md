@@ -1,8 +1,8 @@
 # Latent Reasoning on Hybrid Linear-Attention Architectures
 
 **Does continuous latent thought (Coconut) transfer to hybrid gated-DeltaNet
-+ full-attention models, or does it break down when half the network already
-carries its own recurrent state?**
++ full-attention models, or does it break down when three quarters (24 of 32 layers) already
+carry their own recurrent state?**
 
 This project started as a port of Meta's [Coconut](https://arxiv.org/abs/2412.06769)
 ("Training Large Language Models to Reason in a Continuous Latent Space") onto
@@ -40,8 +40,7 @@ mechanism, not as a claim about any specific downstream application.
 
 ## Status
 
-Actively running experiments. Current findings are preliminary — see
-[Results](#results-so-far) below, which will be updated as runs complete.
+Experiments on the 500-example LoRA r16 setup are complete; see Results. Larger-data runs, multiple seeds, and a pure-attention control are blocked on compute (Kaggle 2x T4, 30h weekly GPU quota).
 
 ## Architecture-specific fixes
 
@@ -162,19 +161,23 @@ unavailable on this hardware. Expect slow steps; this is expected, not a bug.
 - **Base model:** `huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated`
 - **Task:** GSM8K, 500-example training subset, held-out validation set
 - **Comparison axes:**
-  - LoRA rank (16 vs 64, capacity)
-  - Curriculum stage / latent depth (`c_thought` × stage, 2 → 4 → 6 tokens)
-  - Coconut vs CoT-only baseline, same data budget
-- **Metrics:** held-out eval loss (per epoch), generation accuracy on a
-  fixed eval subset, CoT-match rate (whether the model still surfaces any
-  reasoning text at full latent depth — expected to be ~0 by design at
-  `max_latent_stage`)
+  - No-CoT, no-thought control (same curriculum and CoT truncation, no latent tokens), and Coconut
+  - Inference-time latent ablations (embed, shuffle) on the trained Coconut checkpoint
+  - LoRA rank 16 vs 64 (r64 stopped after epoch 6, n=50 eval)
+  - Not run: separate full-CoT baseline, pause-token control
+- **Metrics:** generation accuracy on a fixed eval subset (first 200 of 500 validation problems, greedy, same 200 for every run; 95% Wilson CI) — held-out eval loss was logged per epoch and is used only for the overfitting caveat below; CoT-match not reported at n=200
 
 ## Results
 
 Continuous thought did not outperform the no-thought control in this 500-example LoRA regime. See [docs/RESULTS_latent_ablation.md](docs/RESULTS_latent_ablation.md) for full analysis.
 
-n=200 greedy eval (same 200 problems for every run), 95% Wilson CI ≈ ±7 points. Stage = `epoch // 3` (e1–3 stage 0, e4–6 stage 1 with 2 latents, e7–9 stage 2, e10 stage 3) — matches the log's stage map and the table below.
+n=200 greedy eval (same 200 problems for every run), 95% Wilson CI ≈ ±7 points. Stage = `(epoch - 1) // 3` for 1-indexed epochs (e1–3 stage 0, e4–6 stage 1 with 2 latents, e7–9 stage 2, e10 stage 3) — matches the log's stage map and the table below.
+
+Base model: `huihui-ai/Huihui-Qwen3.5-4B-Claude-4.6-Opus-abliterated` (abliterated variant), not stock Qwen3.5-4B.
+
+Caveat: validation loss is lowest around epochs 1–3 and every run memorizes its training set (train loss near 0 within a few epochs), so latent stages (epoch 4 onward) begin after memorization has started.
+
+Noise note: differences under about 10 points (about 20 problems) between two runs are not interpretable at n=200 with one seed; the epoch-4 embed-vs-no-thought gap (0.52 vs 0.40) did not replicate at epoch 6 (0.490 vs 0.485).
 
 | Run | Epoch (stage) | Correct | Acc |
 |---|---|---|---|
@@ -194,19 +197,10 @@ Data: `coconut_eval_n200.csv`. Raw logs: `eval_logs.zip` (see Release). The clai
 
 ## Open questions
 
-- Does the r16 → r64 accuracy improvement at matched epoch count reflect
-  real capacity gain, or is it an artifact of fewer epochs having had less
-  time to overfit on 500 examples? Needs per-epoch eval across the full run,
-  not 3-epoch snapshots.
-- Does a same-budget CoT-only baseline outperform Coconut on this
-  architecture at any latent depth, or does hybrid recurrence make Coconut's
-  approach redundant/harmful regardless of rank?
-- Is the accuracy drop at deeper latent stages (k=4, k=6) a curriculum
-  effect (needs more steps to adapt) or a genuine architecture-level ceiling
-  from DeltaNet layers' existing state mechanism conflicting with externally
-  imposed latent thought?
-- Does this generalize beyond GSM8K/arithmetic, or beyond Qwen3.5's specific
-  24:8 layer ratio, to hybrid architectures generally?
+- Do latents help at thousands of training examples? Untested.
+- Is the null result specific to the hybrid architecture? Needs a pure-attention control at the same budget.
+- Stages 2–3 (4 and 6 latents) scored lower (about 0.28 and 0.24 at n=50) but these epochs are heavily overfit. No matched no-thought comparison exists at those stages in the released n=200 logs, so curriculum effect vs latent depth is unresolved.
+- r64 scored lower than r16 at matched epochs (0.36 vs 0.60 at epoch 3, 0.22 vs 0.56 at epoch 6, n=50) but was stopped at epoch 6, so capacity is unresolved.
 
 ## Data
 
