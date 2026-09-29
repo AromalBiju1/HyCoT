@@ -5,6 +5,16 @@ nan_checkpoint_*
 nangrad_checkpoint_*
 r_64/
 checkpoints*/
+# Raw eval logs — attached to GitHub Release, not committed (see docs/RESULTS_latent_ablation.md)
+eval_logs.zip
+eval_logs/
+eval_logs*.zip
+results (1).txt
+coconutr16_abl-none_e4_n200.log
+nothought_r16_abl-none_e3_n200.log
+nocot_eval_e1.log
+nocot_eval_e2.log
+
 # Runtime junk
 __pycache__/
 *.pyc

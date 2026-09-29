@@ -1,0 +1,12 @@
+run,epoch,stage,latent_ablation,correct,n,acc,ci95_low,ci95_high
+nocot,3,0,none,44,200,0.22,0.168,0.282
+nothought,3,0,none,107,200,0.535,0.466,0.603
+nothought,4,1,none,80,200,0.4,0.335,0.469
+nothought,6,1,none,97,200,0.485,0.417,0.554
+coconut,3,0,none,114,200,0.57,0.501,0.637
+coconut,4,1,none,91,200,0.455,0.387,0.524
+coconut,4,1,embed,104,200,0.52,0.451,0.588
+coconut,4,1,shuffle,91,200,0.455,0.387,0.524
+coconut,6,1,none,99,200,0.495,0.426,0.564
+coconut,6,1,embed,98,200,0.49,0.422,0.559
+coconut,6,1,shuffle,89,200,0.445,0.378,0.514
